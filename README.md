@@ -75,11 +75,14 @@ templates/                  scaffolds you fill in, once per project
   extract-queue.mjs         ~40 lines of map-walking is all you write
   MAP.skeleton.json         four structural principles, no domain content
 
+templates/prompts/          copy-paste session prompts, 00 → 05
 examples/                   working configs: node-web, go-service
 docs/
+  RUNBOOK.md                ← start here: new project → first batch, 4–6 sessions
+  MAP_GUIDE.md              how to write the map, with real before/after
+  SCARS.md                  ← then this: 14 failures and the guards they produced
   DESIGN.md                 what generalises, what cannot, and known gaps
-  SCARS.md                  ← read this one
-  PORTING.md                adoption path, and how to tell if it's working
+  PORTING.md                per-step detail, and how to tell if it's working
 ```
 
 ---
@@ -90,16 +93,23 @@ docs/
 ./install.sh /path/to/project --stack node-web
 ```
 
-Then four things, none optional:
+Then follow [**docs/RUNBOOK.md**](docs/RUNBOOK.md) — 4–6 sessions to a first green
+batch, with a copy-paste prompt per phase in
+[`templates/prompts/`](templates/prompts/):
 
-1. **`.claude/harness.config.json`** — anchors and setup. Ask: *what does a tree
-   containing only tracked files lack?*
-2. **`{{REPO_INVARIANTS}}`** in both agent contracts. The bar for an entry: it has
-   already caused a real bug *here*.
-3. **The map**, and the extractor that walks it. Commit it.
-4. **`preflight.sh`**.
+```
+  PHASE 0  decide + install                        30 min, human
+  PHASE 1  anchors                                 1–2 h    ← before the map
+  PHASE 2  map skeleton: structure + traps         1 session
+  PHASE 3  audit lanes → openDebt                  1 session, parallel
+  PHASE 4  invariants + coverage honesty           half session
+  PHASE 5  wire extractor + contracts              1 session
+  PHASE 6  a deliberately small first batch        1 session
+```
 
-Full walkthrough in [docs/PORTING.md](docs/PORTING.md).
+Almost all of that is the map — the one artifact the harness cannot generate for
+you. Anchors come **before** it: they are testable in an hour, and the map is
+worth nothing without them.
 
 ---
 
