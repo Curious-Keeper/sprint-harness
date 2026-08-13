@@ -7,6 +7,11 @@ removed.
 
 **Budget: 4–6 working sessions to a first green batch.** Most of it is the map.
 
+> **Small project?** If the codebase has 1–3 distinct surfaces, use
+> [RUNBOOK-SMALL.md](RUNBOOK-SMALL.md) instead — same machinery, 3–4 lighter
+> sessions, and a sizing fork at the top that tells you whether the fan-out graph
+> earns its place at all.
+
 ```
   PHASE 0  decide + install                        30 min, human
   PHASE 1  anchors                                 1–2 h    ← before the map

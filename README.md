@@ -79,6 +79,7 @@ templates/prompts/          copy-paste session prompts, 00 → 05
 examples/                   working configs: node-web, go-service
 docs/
   RUNBOOK.md                ← start here: new project → first batch, 4–6 sessions
+  RUNBOOK-SMALL.md          compressed path for 1–3 surfaces, + the sizing fork
   MAP_GUIDE.md              how to write the map, with real before/after
   SCARS.md                  ← then this: 14 failures and the guards they produced
   DESIGN.md                 what generalises, what cannot, and known gaps
@@ -110,6 +111,14 @@ batch, with a copy-paste prompt per phase in
 Almost all of that is the map — the one artifact the harness cannot generate for
 you. Anchors come **before** it: they are testable in an hour, and the map is
 worth nothing without them.
+
+**Smaller project?** [docs/RUNBOOK-SMALL.md](docs/RUNBOOK-SMALL.md) compresses this
+to 3–4 light sessions, and opens with a sizing fork — because the harness has two
+halves that pay off at different sizes. The **spine** (map, anchors, push guard,
+paired-artifact gate) is worth having on a one-person project. The **graph**
+(queue, partitioner, fan-out, N-lens verify) needs work that is genuinely wide.
+Taking only the spine is a legitimate outcome, and adopting the graph later costs
+one session with nothing wasted.
 
 ---
 
