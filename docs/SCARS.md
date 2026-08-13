@@ -117,7 +117,17 @@ Found only when a verifier could not reproduce the gate's own exit code.
 **The fix.** Herestrings, not pipes. A herestring has no second process and no
 pipe.
 
-**Where it lives.** `core/paired-artifact-gate.sh`, the ⚠ block.
+**It came back.** While writing a test for a *different* bug, `selftest.sh` used
+`install.sh | grep -q "GITIGNORED"` and reported the assertion as failing while
+the behaviour under test worked perfectly by hand. Same mechanism, one layer out,
+inside the harness that exists to catch this class of thing.
+
+Worth internalising rather than memorising the one instance: **`cmd | grep -q`
+under `pipefail` is broken by construction.** Capture to a variable and match with
+a herestring.
+
+**Where it lives.** `core/paired-artifact-gate.sh` and `selftest.sh`, both ⚠
+blocks.
 
 ---
 
@@ -140,7 +150,14 @@ reported success.
 uncommitted changes. Once tracked, it merges forward exactly like code — no copy
 step, no sync script.
 
-**Where it lives.** `core/preflight.sh`, section 7.
+**The wider rule, which bites on adoption day.** It is not just the map:
+**anything an anchor invokes must be tracked too.** Many projects gitignore
+`.claude/` — and then a builder's worktree contains no harness at all, so an
+anchor calling `.claude/work/paired-artifact-gate.sh` does not fail, the file *is
+not there*. `install.sh` checks this with `git check-ignore` and stops loudly,
+because the failure is silent and the fix is a one-line `.gitignore` negation.
+
+**Where it lives.** `core/preflight.sh` section 7; `install.sh` tracked-ness check.
 
 ---
 

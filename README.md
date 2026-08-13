@@ -90,9 +90,23 @@ docs/
 
 ## Install
 
+The kit stays here. It installs **into** a project — you never copy or paste it in.
+
 ```bash
-./install.sh /path/to/project --stack node-web
+cd /path/to/your-existing-project
+git checkout -b chore/sprint-harness
+~/git_projects/sprint-harness/install.sh . --stack node-web
+
+git add .claude && git commit -m "chore: install sprint harness"
 ```
+
+That second command is load-bearing. Builders run in git worktrees, which
+materialize **only tracked files** — so a gitignored `.claude/` means a builder's
+worktree contains no harness at all, and an anchor invoking a script under it does
+not fail, it *is not there*. `install.sh` refuses quietly to let that pass: it
+checks and stops you loudly.
+
+Then open a session in that project and paste the first prompt.
 
 Then follow [**docs/RUNBOOK.md**](docs/RUNBOOK.md) — 4–6 sessions to a first green
 batch, with a copy-paste prompt per phase in

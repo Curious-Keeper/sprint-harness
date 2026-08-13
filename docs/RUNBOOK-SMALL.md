@@ -80,6 +80,51 @@ wrote is wasted — the map is the expensive artifact and it carries over intact
 
 ## The compressed path
 
+### Step 1 — install, before any session
+
+You do **not** copy this kit into the project. It stays where it is and installs
+itself:
+
+```bash
+cd /path/to/your-existing-project
+git checkout -b chore/sprint-harness
+~/git_projects/sprint-harness/install.sh . --stack <node-web|go-service|blank>
+```
+
+That copies `core/` to `.claude/harness-core/`, drops the templates you will fill
+in, and wires the push guard into `.claude/settings.json`. Nothing is pasted by
+hand at any point.
+
+### Step 2 — commit it, and check it is not ignored
+
+```bash
+git add .claude && git commit -m "chore: install sprint harness"
+```
+
+**This is load-bearing, not hygiene.** Builders run in git worktrees, which
+materialize **only tracked files**. Many projects gitignore `.claude/` — and then
+a builder's worktree contains no harness at all: an anchor that invokes
+`.claude/work/paired-artifact-gate.sh` does not fail, the file *is not there*.
+
+`install.sh` checks this and stops you loudly if `.claude/` is ignored. If it
+does, un-ignore the harness before going further:
+
+```gitignore
+.claude/*
+!.claude/harness-core/
+!.claude/agents/
+!.claude/skills/
+!.claude/work/
+!.claude/hooks/
+!.claude/harness.config.json
+!.claude/settings.json
+```
+
+The general rule, which also governs where the map lives: **anything an anchor
+invokes, and anything an item's evidence cites, must be tracked.**
+
+### Step 3 — run the sessions
+
 ```
   SESSION A   config + anchors + map skeleton + traps      prompt S1
   SESSION B   audit pass — lane 1                          prompt S2
@@ -88,8 +133,15 @@ wrote is wasted — the map is the expensive artifact and it carries over intact
   SESSION E   a deliberately small first batch              prompt 05
 ```
 
+Open a session **in the target project** and paste the prompt. Each prompt is
+self-contained; the agent reads what it needs from the installed kit.
+
 B and C are short and can run back to back. Realistically this is a long day, or
 two comfortable ones.
+
+> Anything a prompt tells the agent to run — the `/tmp/harness-probe` clone in S1,
+> for instance — happens **inside** that session. Those are tasks for the agent,
+> not setup steps for you.
 
 ### What collapsed, and why it was safe
 

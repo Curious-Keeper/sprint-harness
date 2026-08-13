@@ -63,6 +63,29 @@ grep -q MARKER "$REPO/.claude/harness.config.json" \
     && ok "re-install does NOT clobber a filled-in config" \
     || no "re-install does NOT clobber a filled-in config"
 
+# A gitignored .claude/ means a builder's worktree has NO harness — an anchor
+# invoking a script under it does not fail, the file is not there. Silent, and
+# common, so the installer must catch it.
+IGN="$TMP/ignored"; mkdir -p "$IGN/src"
+git init -q "$IGN"; git -C "$IGN" config user.email t@t.t; git -C "$IGN" config user.name t
+echo x > "$IGN/src/a.ts"; echo ".claude/" > "$IGN/.gitignore"
+git -C "$IGN" add -A && git -C "$IGN" commit -qm init
+# ⚠ CAPTURE, DO NOT PIPE INTO grep -q. `set -o pipefail` is on (line 26), grep -q
+# exits the instant it matches, that SIGPIPEs the writer with 141, and pipefail
+# reports the pipeline as FAILED even though grep MATCHED. This is scar #4 — the
+# same bug the paired-artifact gate was fixed for — and it reproduced here, in the
+# test harness, while writing the test for a different bug. Capture to a variable
+# and match with a herestring: no second process, no pipe.
+ign_out=$("$HERE/install.sh" "$IGN" 2>&1)
+grep -q "GITIGNORED" <<< "$ign_out" \
+    && ok "installer warns when .claude/ is gitignored" \
+    || no "installer warns when .claude/ is gitignored"
+
+clean_out=$("$HERE/install.sh" "$REPO" 2>&1)
+grep -q "GITIGNORED" <<< "$clean_out" \
+    && no "installer stays quiet when .claude/ is trackable" \
+    || ok "installer stays quiet when .claude/ is trackable"
+
 # ── config ───────────────────────────────────────────────────────────────────
 echo
 echo "── config ──"

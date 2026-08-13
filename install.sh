@@ -111,9 +111,55 @@ else
     echo "    (see core/deny-push.sh header for the exact snippet)"
 fi
 
+# ── tracked-ness check ───────────────────────────────────────────────────────
+#
+# Builders run in git worktrees, which materialize ONLY TRACKED FILES. Many
+# projects gitignore `.claude/` — and then a builder's worktree contains no
+# harness at all: an anchor that invokes `.claude/work/paired-artifact-gate.sh`
+# is not merely failing, the file does not exist. This is scar #5 one layer out,
+# and it is silent, so it is checked mechanically here rather than documented.
+IGNORED=""
+for p in ".claude/harness-core/plan-batch.mjs" ".claude/work/paired-artifact-gate.sh" \
+         ".claude/agents/sprint-builder.md" ".claude/harness.config.json"; do
+    if git -C "$ROOT" check-ignore -q "$p" 2>/dev/null; then IGNORED="$IGNORED  $p"$'\n'; fi
+done
+
+if [ -n "$IGNORED" ]; then
+    cat <<EOF
+
+  ⛔  STOP — these installed paths are GITIGNORED:
+
+$IGNORED
+  Builders run in git worktrees, which materialize ONLY TRACKED FILES. With
+  .claude/ ignored, a builder's worktree contains no harness: any anchor that
+  invokes a script under .claude/ finds nothing there, and the map is unreadable
+  to the agent planning from it.
+
+  Fix before anything else — un-ignore the harness, e.g. in .gitignore:
+
+      .claude/*
+      !.claude/harness-core/
+      !.claude/agents/
+      !.claude/skills/
+      !.claude/work/
+      !.claude/hooks/
+      !.claude/harness.config.json
+      !.claude/settings.json
+
+  Keep ignoring anything local: .claude/settings.local.json, caches, scratch.
+EOF
+fi
+
 cat <<EOF
 
-Installed. Four things to do, in order — none of them optional:
+Installed. FIRST: commit the harness.
+
+    git add .claude && git commit -m "chore: install sprint harness"
+
+Not optional and not cosmetic — see the note above. Anything an anchor invokes,
+and the map itself, must be TRACKED or it does not exist in a builder's worktree.
+
+Then four things, in order — none of them optional either:
 
   1. .claude/harness.config.json
      Set project.name, mainBranch, and the ANCHORS. Ask: what does a tree
