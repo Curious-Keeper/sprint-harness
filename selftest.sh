@@ -199,14 +199,43 @@ do
 done
 
 # A DELIBERATE over-block, asserted so nobody "fixes" it later. `echo git push`
-# is denied because the pattern cannot distinguish a literal from an invocation
-# without parsing shell, and this guard fails closed by design. Over-blocking a
-# harmless echo costs nothing; under-blocking one chained push costs everything.
+# is denied because the pattern cannot distinguish an UNQUOTED literal from an
+# invocation without parsing shell, and this guard fails closed by design.
+# Over-blocking a harmless echo costs nothing; under-blocking one chained push
+# costs everything.
 if printf '{"tool_input":{"command":"echo git push"}}' | "$G" | denies; then
-    ok "over-blocks 'echo git push' (deliberate — fails closed)"
+    ok "over-blocks unquoted 'echo git push' (deliberate — fails closed)"
 else
-    no "over-blocks 'echo git push' (deliberate — fails closed)"
+    no "over-blocks unquoted 'echo git push' (deliberate — fails closed)"
 fi
+
+# INERT QUOTED REGIONS. The pattern spans a git invocation's arguments by design
+# (`git -C /path push`), so before the fix it also spanned a quoted argument and
+# denied `git commit -m "...push..."`. It fired on this repo's own history.
+# These assert the strip works AND that it cannot be used to smuggle a push.
+for cmd in \
+    'git commit -m "docs: fix the push guard"' \
+    "git commit -m 'fix: do not push on error'" \
+    'git commit -m "it'"'"'s fine, no push here"' \
+    'git log --grep="push"'
+do
+    if printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')" \
+        | "$G" | denies; then no "allows quoted mention: $cmd"
+    else ok "allows quoted mention: $cmd"; fi
+done
+
+# ...and the smuggling attempts the strip must NOT let through.
+for cmd in \
+    'git commit -m "wip" && git push' \
+    "git commit -m 'wip' && git push -f" \
+    'echo "$(git push)"' \
+    'git commit -m "it'"'"'s ok" && git push -f '"'"'x'"'"'' \
+    'git commit -m "unterminated && git push'
+do
+    if printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')" \
+        | "$G" | denies; then ok "still denies: $cmd"
+    else no "still denies: $cmd"; fi
+done
 
 for cmd in \
     "git status" \

@@ -83,6 +83,27 @@ If a push is genuinely required, say so and STOP. Do not work around this."
 # Normalise so 'git\npush' and 'git    push' read the same as 'git push'.
 flat=$(printf '%s' "$cmd" | tr '\n\t' '  ')
 
+# Strip INERT quoted regions before matching.
+#
+# WHY: the pattern below deliberately spans a git invocation's arguments
+# (`git -C /path push`), so it also spans a quoted argument — which made
+# `git commit -m "docs: fix the push guard"` read as a push and denied a COMMIT.
+# That is not a theoretical case; it fired on this repo's own history.
+#
+# A region is inert only if a command cannot run inside it:
+#   - double-quoted with NO `$` and NO backtick  → no substitution possible
+#   - single-quoted                              → never substitutes
+# Anything containing `$(` or a backtick is LEFT IN PLACE, so `echo "$(git push)"`
+# is still caught.
+#
+# ORDER MATTERS. Double quotes are stripped FIRST because an apostrophe inside a
+# double-quoted string ("it's ok") would otherwise open a bogus single-quoted
+# region that could swallow a real `git push` after it. Verified in selftest.sh.
+#
+# Unbalanced quotes match nothing and are therefore not stripped — the guard
+# still fails closed on malformed input.
+flat=$(printf '%s' "$flat" | sed -E 's/"[^"$`]*"//g' | sed -E "s/'[^']*'//g")
+
 # `git <anything that is not a command separator> push` — catches:
 #   git push                      git push --force            git push -f
 #   git -C /path push             git --git-dir=x push        git push --force-with-lease

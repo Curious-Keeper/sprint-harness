@@ -353,3 +353,50 @@ what you want to find before merging.
 
 This is the whole philosophy compressed into one check: **judge the system on
 numbers that cannot argue back.**
+
+---
+
+## 15. A guard that spans arguments also spans quoted arguments
+
+**What happened.** The push pattern deliberately spans a git invocation's
+arguments, so that `git -C /some/path push` is caught. That same span reaches into
+a *quoted* argument — so `git commit -m "docs: fix the push guard"` matched, and a
+**commit** was denied.
+
+Found the only way this kind of thing gets found: it fired while committing this
+repository's own history, on a message that happened to describe the guard.
+
+**Why it mattered more than it looks.** Over-blocking is the safe direction, and a
+denied commit is recoverable. But a guard that fires on ordinary, correct commands
+is a guard people start routing around — and the moment someone adds a bypass
+habit, the real deny stops meaning anything. Usability is a security property here.
+
+**The fix.** Strip *inert* quoted regions before matching. A region is inert only
+if a command cannot run inside it:
+
+- double-quoted containing **no `$` and no backtick** → no substitution possible
+- single-quoted → never substitutes
+
+Anything containing `$(` or a backtick is left in place, so `echo "$(git push)"`
+is still caught.
+
+**The subtle part — order matters.** Double quotes must be stripped *first*. An
+apostrophe inside a double-quoted string (`"it's ok"`) would otherwise open a
+bogus single-quoted region that swallows a real `git push` after it:
+
+```
+git commit -m "it's ok" && git push -f 'x'
+   single-quote-first →  strips "s ok" && git push -f "  →  PUSH HIDDEN
+   double-quote-first →  strips "it's ok" and 'x'        →  push caught
+```
+
+Unbalanced quotes match nothing and are therefore not stripped, so malformed input
+still fails closed.
+
+`selftest.sh` asserts both directions — four quoted mentions that must pass, and
+five smuggling attempts that must still deny, including the apostrophe case above.
+
+**The general rule.** When a guard pattern spans a region, work out what *else*
+lives in that region. And when you relax a guard for usability, write the
+smuggling tests *first* — the relaxation is only safe if you can state exactly
+what it cannot let through.
