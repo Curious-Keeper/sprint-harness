@@ -1,0 +1,82 @@
+{
+    "$schema": "../harness.config.schema.json",
+
+    "project": {
+        "name": "my-web-app",
+        "worktree": null,
+        "mainBranch": "main",
+        "remote": "origin"
+    },
+
+    "map": {
+        "path": "docs/app-maps/APP_MAP.json",
+        "requireCommitted": true,
+        "checkCmd": null
+    },
+
+    "queue": {
+        "path": ".claude/work/QUEUE.json",
+        "writeOnlyFrom": null
+    },
+
+    "setup": [
+        {
+            "cmd": "npm ci",
+            "cwd": "web",
+            "why": "A fresh git worktree contains only TRACKED files, so node_modules does not exist and the test runner is not installed. NEVER symlink or copy node_modules from another worktree — that checkout is on a different branch with a different lockfile, and your green anchors would describe a build that does not exist. A clean install takes ~8 seconds."
+        }
+    ],
+
+    "anchors": [
+        { "id": "tsc",  "cmd": "npx tsc --noEmit", "cwd": "web" },
+        { "id": "lint", "cmd": "npm run lint",     "cwd": "web" },
+        { "id": "test", "cmd": "npm test",         "cwd": "web" },
+        {
+            "id": "componentTests",
+            "cmd": ".claude/work/paired-artifact-gate.sh",
+            "cwd": ".",
+            "always": false,
+            "whenTouches": ["web/components/"]
+        }
+    ],
+
+    "lanes": [
+        {
+            "id": "migration",
+            "itemFlag": "needsNewMigration",
+            "why": "forward-only numbering — two agents cannot both mint the next migration number, and no merge can resolve that collision"
+        }
+    ],
+
+    "pairedArtifacts": [
+        {
+            "id": "component-tests",
+            "srcDir": "web/components",
+            "srcExt": ".tsx",
+            "pairPath": "web/components/__tests__/{name}.test.tsx",
+            "excludeDirs": ["web/components/__tests__"],
+            "waiverTrailer": "no-test({name})",
+            "help": "Read web/test/README.md and copy the pattern that matches: a controlled component with no local state, one driven by the keyboard, or one with a server action inside useTransition."
+        }
+    ],
+
+    "verify": {
+        "lenses": ["intent", "invariants", "anchors"],
+        "requireAllLenses": true
+    },
+
+    "git": {
+        "denyPush": true,
+        "denyPushReason": "BLOCKED: git push is denied for AI agents on this project.\n\nStaging and committing are allowed; publishing is not, in any form.\n\nThe gate before any push is: build -> test -> commit -> merge forward -> deploy locally -> a human verifies the RUNNING APP by hand. They perform the push.\n\nIf a push is genuinely required, say so and stop. Do not work around this.",
+        "stackBranches": true,
+        "excludeFromStacking": [],
+        "prePushGuard": null
+    },
+
+    "agents": {
+        "builder": "sprint-builder",
+        "verifier": "sprint-verifier"
+    },
+
+    "branchPrefix": "sprint"
+}

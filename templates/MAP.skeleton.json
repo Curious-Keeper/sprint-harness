@@ -1,0 +1,97 @@
+{
+    "$comment": "SKELETON for the MAP. This file is READ-ONLY to a sprint: it records what is TRUE about the codebase. QUEUE.json is the sprint state that references it by item id. Sections marked $howToWrite are guidance — delete them once you have real content. The four structural principles here are the portable part; the section names under `architecture` are yours to replace.",
+
+    "meta": {
+        "name": "my-project",
+        "generated": "YYYY-MM-DD",
+        "headCommit": "the commit this map was verified against",
+        "oneLiner": "what this system does, in one sentence",
+        "stack": {}
+    },
+
+    "architecture": {
+        "$howToWrite": "Replace this whole section with whatever describes YOUR system: database tables, routes, services, modules, jobs. Describe CONSEQUENCES, not structure. An agent can read your directory listing; it cannot read the trigger that will throw a raw Postgres exception in a user's face when a new column prints on a signed document. Structure is free; consequences are the map's entire value."
+    },
+
+    "invariants": {
+        "$howToWrite": "THE BAR: each entry has already caused a real bug in this repo. Not 'this would be bad' — 'this WAS bad, on this date'. A list padded with plausible-sounding rules trains every agent to skim the section. Write each as: the rule, then the concrete failure mode. These feed {{REPO_INVARIANTS}} in both agent contracts.",
+        "items": [
+            {
+                "id": "inv-1",
+                "rule": "",
+                "failureMode": "what goes wrong, in concrete user-visible terms",
+                "enforcedBy": "a test, a trigger, a CI check — or 'nothing yet', which is itself worth knowing"
+            }
+        ]
+    },
+
+    "evolutionTraps": {
+        "$howToWrite": "Things that USED to be true. Columns dropped, tables renamed, APIs replaced. This section exists because older code and older docs still imply they exist, and an agent that pattern-matches on them writes code that references nothing. This is the highest-value-per-line section in the entire map.",
+        "items": []
+    },
+
+    "openDebt": {
+        "$comment": "Dispatchable code work. THE ONLY TEST for an entry belonging here: can a human name the exact files it will touch TODAY, without designing anything first? Everything else goes to plannedWork or decisionsOwed.",
+        "verifiedOn": "YYYY-MM-DD",
+        "high": [
+            {
+                "id": "S#1",
+                "summary": "one line — becomes the queue item title",
+                "evidence": "file.ts:123-140 — a CITATION, not a description. The builder verifies the line still says this before changing it, and reports staleEvidence when it does not. That turns map rot into a tracked finding instead of silent drift.",
+                "mechanism": "why this actually breaks, causally",
+                "fix": "the shape of the fix — not the diff"
+            }
+        ],
+        "medium": [],
+        "low": [],
+        "acceptedRisks": [
+            {
+                "$howToWrite": "Known, deliberately not fixed, with WHO accepted it. Without this section every audit re-discovers the same items forever."
+            }
+        ]
+    },
+
+    "plannedWork": {
+        "$comment": "Wanted, not yet dispatchable. Split from openDebt because these need scoping before a builder can be pointed at them.",
+        "backlog": [
+            { "n": 1, "what": "", "ref": "an item id or map section this restates, if any — the partitioner treats an exact item-id match as a collision edge" }
+        ],
+        "decisionsOwed": {
+            "$comment": "NOT CODE. These need a human to decide something. Dispatching a builder at one produces confident fiction. Kept in the map so they are visible; kept out of the dispatchable lanes so they are never handed to an agent.",
+            "items": []
+        }
+    },
+
+    "externalState": {
+        "$comment": "NOT CODE. Truth that lives outside this repo — a SaaS console, a DNS record, a client's machine, an unmerged upstream PR. Never dispatchable. An agent asked to 'check' one of these will report on what it can see locally and present that as the answer.",
+        "asOf": "YYYY-MM-DD",
+        "confirmedDone": [],
+        "open": [],
+        "unknown": []
+    },
+
+    "shipped": {
+        "$comment": "Closed work MOVES HERE from openDebt. It does NOT sit in the queue with status:done. An item that is both queued and closed is exactly the ambiguity this section removes — and the extractor never sees it, so it cannot be re-dispatched.",
+        "batches": {},
+        "items": []
+    },
+
+    "sprintHarness": {
+        "$comment": "The map records its own harness, so a fresh agent can learn how the system works from the same file it plans from.",
+        "model": "fan out one builder per collision-free node in isolated worktrees; verify each through N distinct lenses with fresh context; reduce in plain code; one human gate at the end",
+        "theOneInvariant": "Anchors, not agreement. A graph where every node reads another node's report and they all agree is consistent and unverified. Trust exit codes watched happen, and a verifier that never saw the builder's context.",
+        "lenses": {
+            "intent": "did it do what the item said, and NOTHING else",
+            "invariants": "did it break something this repo has already been burned by",
+            "anchors": "did the checks pass — watched, right now, re-run independently"
+        },
+        "outcomes": {
+            "accepted": "built, every lens ran, none rejected",
+            "rejected": "a verifier positively found a problem",
+            "unverified": "a lens did not return. NOBODY JUDGED THIS. Not the same as rejected.",
+            "notBuilt": "the builder reported blocked or partial"
+        },
+        "humanGate": "describe YOUR verification path — and who pushes",
+        "batchHistory": []
+    }
+}

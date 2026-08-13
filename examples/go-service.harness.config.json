@@ -1,0 +1,79 @@
+{
+    "$schema": "../harness.config.schema.json",
+
+    "$comment": "A Go service. Shows that the harness does not care about the stack — only that every claim reduces to an exit code. Note there is no `setup`: Go modules are cached per-machine, not per-worktree, so a fresh worktree needs nothing. That is the one thing to check when porting: what does a tree containing ONLY tracked files lack?",
+
+    "project": {
+        "name": "my-go-service",
+        "worktree": null,
+        "mainBranch": "main",
+        "remote": "origin"
+    },
+
+    "map": {
+        "path": "docs/MAP.json",
+        "requireCommitted": true
+    },
+
+    "queue": {
+        "path": ".claude/work/QUEUE.json"
+    },
+
+    "setup": [],
+
+    "anchors": [
+        { "id": "build", "cmd": "go build ./...", "cwd": "." },
+        { "id": "vet",   "cmd": "go vet ./...",   "cwd": "." },
+        { "id": "test",  "cmd": "go test ./...",  "cwd": "." },
+        {
+            "id": "fmt",
+            "cmd": "test -z \"$(gofmt -l .)\"",
+            "cwd": ".",
+            "$comment": "gofmt -l prints unformatted files and still exits 0. Wrapping it in `test -z` is what turns it into an anchor — a check that cannot fail is not a check.",
+            "always": true
+        },
+        {
+            "id": "migrationPair",
+            "cmd": ".claude/work/paired-artifact-gate.sh",
+            "cwd": ".",
+            "always": false,
+            "whenTouches": ["migrations/"]
+        }
+    ],
+
+    "lanes": [
+        {
+            "id": "migration",
+            "itemFlag": "needsNewMigration",
+            "why": "forward-only numbering — two agents cannot both mint the next migration number"
+        },
+        {
+            "id": "proto",
+            "itemFlag": "touchesProto",
+            "why": "regenerating protobuf stubs rewrites a shared generated tree; two agents regenerating from different .proto states produce a merge nothing can reconcile"
+        }
+    ],
+
+    "pairedArtifacts": [
+        {
+            "id": "migration-rollback",
+            "srcDir": "migrations",
+            "srcExt": ".up.sql",
+            "pairPath": "migrations/{name}.down.sql",
+            "waiverTrailer": "no-rollback({name})",
+            "help": "Every forward migration ships its rollback. If the change is genuinely irreversible (a DROP of data), waive it by name and say why — an irreversible migration should be a decision someone signed, not a missing file."
+        }
+    ],
+
+    "verify": {
+        "lenses": ["intent", "invariants", "anchors"],
+        "requireAllLenses": true
+    },
+
+    "git": {
+        "denyPush": true,
+        "stackBranches": true
+    },
+
+    "branchPrefix": "sprint"
+}

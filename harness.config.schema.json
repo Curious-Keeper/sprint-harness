@@ -1,0 +1,212 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://github.com/local/sprint-harness/harness.config.schema.json",
+    "title": "sprint-harness configuration",
+    "description": "The single file that makes the harness portable. Everything project-specific that core/ needs lives here; nothing project-specific lives in core/.",
+    "type": "object",
+    "required": ["project", "queue", "anchors"],
+    "additionalProperties": false,
+    "properties": {
+        "$schema": { "type": "string" },
+
+        "project": {
+            "type": "object",
+            "required": ["name", "mainBranch"],
+            "additionalProperties": false,
+            "properties": {
+                "name": { "type": "string" },
+                "worktree": {
+                    "type": ["string", "null"],
+                    "description": "Basename of the directory sprints MUST run from. null disables the check. Set it when the repo has more than one worktree and only one of them is publishable."
+                },
+                "mainBranch": { "type": "string", "default": "main" },
+                "remote": { "type": "string", "default": "origin" }
+            }
+        },
+
+        "map": {
+            "type": ["object", "null"],
+            "description": "The knowledge base the queue is derived from. Optional: a project can hand-maintain QUEUE.json and skip the map entirely.",
+            "additionalProperties": false,
+            "properties": {
+                "path": { "type": "string" },
+                "requireCommitted": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Builders run in git worktrees, which materialize only TRACKED files. An uncommitted map is invisible to every builder while you are reading the new one."
+                },
+                "checkCmd": {
+                    "type": ["string", "null"],
+                    "description": "Optional command that exits non-zero when a derived artifact (an HTML render, an index) is stale."
+                }
+            }
+        },
+
+        "queue": {
+            "type": "object",
+            "required": ["path"],
+            "additionalProperties": false,
+            "properties": {
+                "path": { "type": "string", "default": ".claude/work/QUEUE.json" },
+                "writeOnlyFrom": {
+                    "type": ["string", "null"],
+                    "description": "Worktree basename allowed to run the extractor with --write. File citations resolve against the working tree, so writing the queue from a different worktree can silently produce a different collision graph."
+                }
+            }
+        },
+
+        "anchors": {
+            "type": "array",
+            "minItems": 1,
+            "description": "The exit codes this harness trusts. NOT a style preference — an anchor is a command a builder runs and an independent verifier RE-RUNS. A disagreement between the two is the single most valuable signal the system produces.",
+            "items": {
+                "type": "object",
+                "required": ["id", "cmd"],
+                "additionalProperties": false,
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z][a-zA-Z0-9]*$",
+                        "description": "Short identifier. Becomes a key in the builder/verifier structured output, so keep it a bare word."
+                    },
+                    "cmd": { "type": "string" },
+                    "cwd": { "type": "string", "default": "." },
+                    "always": { "type": "boolean", "default": true },
+                    "whenTouches": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Run this anchor only when the diff touches one of these paths/prefixes. Keeps a slow anchor off nodes that cannot have broken it."
+                    }
+                }
+            }
+        },
+
+        "setup": {
+            "type": "array",
+            "description": "Commands every builder and verifier runs BEFORE the anchors, in a fresh worktree.",
+            "items": {
+                "type": "object",
+                "required": ["cmd"],
+                "additionalProperties": false,
+                "properties": {
+                    "cmd": { "type": "string" },
+                    "cwd": { "type": "string", "default": "." },
+                    "why": {
+                        "type": "string",
+                        "description": "Shown verbatim in the agent contracts. Say what breaks if the agent improvises a shortcut — agents skip steps whose cost they cannot see."
+                    }
+                }
+            }
+        },
+
+        "lanes": {
+            "type": "array",
+            "description": "Categories of work that CANNOT be parallelised against each other, regardless of which files they touch. The canonical case is numbered forward-only migrations: two agents cannot both mint the next number, and no merge can resolve it.",
+            "items": {
+                "type": "object",
+                "required": ["id", "itemFlag", "why"],
+                "additionalProperties": false,
+                "properties": {
+                    "id": { "type": "string" },
+                    "itemFlag": {
+                        "type": "string",
+                        "description": "Boolean field on a queue item. Every selected item with this flag truthy is unioned into one serial node."
+                    },
+                    "why": { "type": "string" }
+                }
+            }
+        },
+
+        "pairedArtifacts": {
+            "type": "array",
+            "description": "Mechanical 'if you changed X you must also change Y' gates, with an auditable waiver. This exists because the same rule as PROSE in an agent contract produced three test files across fifty-one components.",
+            "items": {
+                "type": "object",
+                "required": ["id", "srcDir", "srcExt", "pairPath"],
+                "additionalProperties": false,
+                "properties": {
+                    "id": { "type": "string" },
+                    "srcDir": { "type": "string" },
+                    "srcExt": { "type": "string", "description": "e.g. \".tsx\", \".go\"" },
+                    "pairPath": {
+                        "type": "string",
+                        "description": "Template for the required counterpart. {name} = source basename without extension. e.g. \"web/components/__tests__/{name}.test.tsx\""
+                    },
+                    "excludeDirs": { "type": "array", "items": { "type": "string" } },
+                    "waiverTrailer": {
+                        "type": "string",
+                        "default": "no-test({name})",
+                        "description": "Commit-message trailer that waives the rule for ONE named source file. Blanket waivers are unsupported on purpose — an exemption must be greppable and arguable."
+                    },
+                    "help": { "type": "string", "description": "Printed on failure. Point at the pattern to copy." }
+                }
+            }
+        },
+
+        "verify": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "lenses": {
+                    "type": "array",
+                    "minItems": 1,
+                    "default": ["intent", "invariants", "anchors"],
+                    "description": "One verifier per lens per node, each with a context that has never seen the builder's. Distinct QUESTIONS, not redundant reviewers — which is why ONE reject fails a node rather than being outvoted."
+                },
+                "requireAllLenses": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "A node is accepted only when every lens actually returned. A lens that crashed leaves the node UNVERIFIED, which is not the same outcome as rejected."
+                }
+            }
+        },
+
+        "git": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "denyPush": { "type": "boolean", "default": true },
+                "denyPushReason": {
+                    "type": "string",
+                    "description": "Shown to the agent on denial. State what the real gate is, so the agent stops instead of hunting for another route."
+                },
+                "stackBranches": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "When true, preflight refuses to call the main branch a valid base while ANY local branch is ahead of the remote. Branching from main there silently drops every unpushed commit from your base."
+                },
+                "excludeFromStacking": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Branches that are permanently ahead of the remote by design (a demo branch, a never-pushed integration branch) and are therefore not stacking bases."
+                },
+                "prePushGuard": {
+                    "type": ["object", "null"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "installer": { "type": "string" },
+                        "marker": {
+                            "type": "string",
+                            "description": "String that must appear in .git/hooks/pre-push for preflight to consider the guard installed."
+                        }
+                    }
+                }
+            }
+        },
+
+        "agents": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "builder": { "type": "string", "default": "sprint-builder" },
+                "verifier": { "type": "string", "default": "sprint-verifier" }
+            }
+        },
+
+        "branchPrefix": {
+            "type": "string",
+            "default": "sprint",
+            "description": "Node branches are <branchPrefix>/<batchName>/<node-slug>."
+        }
+    }
+}
