@@ -232,34 +232,38 @@ else
     no "over-blocks unquoted 'echo git push' (deliberate — fails closed)"
 fi
 
-# LOCAL STASH IS NOT PUBLISHING. `git stash push` is the modern spelling of
-# `git stash`, and it is the remedy pre-flight itself prints ("working tree
-# DIRTY — commit or stash before branching"). The pattern spans a git
-# invocation's arguments, so `stash` fell inside [^;&|]* and the guard denied
-# the very command its sibling recommends. Because the hook aborts the WHOLE
-# Bash call, it also took an unrelated backup step with it and destroyed an
-# uncommitted edit. Found 2026-08-14, brian-chastain batch 1.
+# `git stash push` IS DENIED, AND THAT IS PINNED HERE ON PURPOSE.
+#
+# Five separate sessions have proposed neutralising `git stash push` before the
+# match. It is individually defensible every time — stash takes pathspecs, not a
+# remote — and it is still refused, because the guard's whole value is that no
+# region of a command line gets a `push` token ignored. These assertions exist so
+# that session six's carve-out turns the suite red instead of looking harmless.
+#
+# The workaround belongs in the operator's hands, not in the pattern: `git stash`
+# bare is already allowed, `command cp` snapshots a file with no git verb at all,
+# and `git show HEAD:path > /tmp/...` reads an old revision. See DEFAULT_REASON.
 for cmd in \
     "git stash push" \
     "git stash push -q core/preflight.sh" \
     'git stash push -m "wip"' \
-    "git stash save wip" \
-    "git stash pop" \
     "git -C /elsewhere stash push"
 do
     if printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')" \
-        | "$G" | denies; then no "allows local stash: $cmd"; else ok "allows local stash: $cmd"; fi
+        | "$G" | denies; then ok "over-blocks '$cmd' (deliberate — do not carve out)"
+    else no "over-blocks '$cmd' (deliberate — do not carve out)"; fi
 done
-# ...and the carve-out must consume ONLY that phrase. A real push later in the
-# same command line is still denied — otherwise the exemption is a hole, which
-# is exactly how scar #8 happens.
+# The spellings that do NOT contain the token are unaffected, which is what makes
+# the deny survivable: there is always a permitted way to do the same local work.
 for cmd in \
-    "git stash push && git push" \
-    "git stash push -m x; git push -f" \
-    "git stash pop && git push origin main"
+    "git stash" \
+    "git stash pop" \
+    "git stash list" \
+    "git stash save wip"
 do
     if printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')" \
-        | "$G" | denies; then ok "still denies: $cmd"; else no "still denies: $cmd"; fi
+        | "$G" | denies; then no "still allows the escape hatch: $cmd"
+    else ok "still allows the escape hatch: $cmd"; fi
 done
 
 # INERT QUOTED REGIONS. The pattern spans a git invocation's arguments by design

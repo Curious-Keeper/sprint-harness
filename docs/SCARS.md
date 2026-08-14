@@ -580,20 +580,36 @@ in `selftest.sh`.
 
 ---
 
-## 19. The push guard denied the remedy its own sibling prints
+## 19. Five sessions tried to widen the push guard. The guard was right.
 
-**What happened.** `git stash push` was denied. The pattern deliberately spans a
-git invocation's arguments to catch `git -C /path push`, so `stash` fell inside
-`[^;&|]*` and the subcommand read as a publish.
+**What happened.** `git stash push` is denied. The pattern spans a git
+invocation's arguments so it can catch `git -C /path push`, and `stash` sits
+inside that same `[^;&|]*`. It reads as a publish.
 
-`git stash push` is the modern spelling of `git stash`. It is also, word for
-word, what `preflight.sh` prints when the tree is dirty: *"working tree DIRTY —
-commit or stash before branching."* One half of the harness recommended a
-command the other half blocked.
+**Five separate sessions have independently proposed the same carve-out** —
+neutralise `git stash push|save` before the match. The argument is good every
+time: stash writes a local ref, takes pathspecs, and cannot contact a remote. A
+patch was written and it tested clean, allowing all six stash spellings while
+still denying `git stash push && git push`.
 
-**Why it was dangerous, and it is not the false positive.** The hook is
-`PreToolUse` on Bash, so denying the command aborts the **entire tool call**, not
-the offending clause. The denied call was:
+**It was reverted, and that is the scar.**
+
+**Why.** The guard's entire value is that there is NO region of a command line
+where a `push` token is ignored. Every exemption is individually defensible and
+collectively fatal: each one enlarges the surface the pattern must reason about,
+and the next proposal always arrives with a slightly better argument than the
+last. Five sessions converging on the same relaxation is evidence the guard sits
+exactly where it hurts — which is where a guard belongs — not evidence it is
+misplaced. A rule argued down once is argued down again, and the sixth argument
+will be the one that is wrong.
+
+> The cost of a false positive is one command. The cost of a false negative is a
+> published repository under a real person's name. These are not comparable, and
+> a control that has survived five well-reasoned attacks should not fall to the
+> sixth.
+
+**The damage was never the deny.** The hook is `PreToolUse` on Bash, so a deny
+aborts the **entire tool call**, not the offending clause. The call was:
 
 ```bash
 command cp core/preflight.sh "$BACKUP"   # ← never ran
@@ -601,24 +617,33 @@ git stash push -q core/preflight.sh      # ← what tripped the guard
 ```
 
 The backup was silently skipped. A later `git show HEAD:core/preflight.sh >
-core/preflight.sh` then restored the old file over an edit that existed nowhere
-else, and the work was gone.
+core/preflight.sh` then wrote the old file over an edit that existed nowhere
+else. The stash deny cost one command; **putting it in the same call as the
+backup cost the work.**
 
-> A guard that blocks a legitimate command does not cost you that command. It
-> costs you everything else in the same call, including the step that would have
-> made the loss recoverable.
+> Never put a guard-sensitive command in the same call as a step you cannot
+> afford to lose. That is a call-granularity rule. It is not a reason to move
+> the guard.
 
-**The fix.** Neutralise `git stash push|save` to a token containing no `push`
-*before* the match, consuming only that phrase. No form of `git stash push`
-contacts a remote — it writes a local ref and takes pathspecs — so nothing that
-reaches the human's boundary is allowed through. Every other occurrence on the
-line is still matched: `git stash push && git push` remains denied on its second
-half, and that is asserted, because an exemption that swallows the rest of the
-line is scar #8 rebuilt by hand.
+**What to do instead** — recorded in `DEFAULT_REASON` so the *next* session reads
+it at the moment it is denied, rather than reading the pattern and reaching for
+sed:
 
-The deliberate over-block on unquoted `echo git push` **stays**. That case is an
-ambiguous literal and the guard fails closed by design; this one is an
-unambiguous local subcommand. Do not generalise from one to the other.
+| need | use |
+|---|---|
+| stash the tree | `git stash` — bare is already allowed |
+| snapshot a file | `command cp <file> /tmp/<scratch>/<file>.bak` |
+| read an old revision | `git show HEAD:<path> > /tmp/<scratch>/old` — **never** over the working file |
+| compare a commit | `git worktree add --detach` |
 
-**Where it lives.** The normalisation step in `core/deny-push.sh`, and the local
-stash cases in the `── push guard ──` block of `selftest.sh`.
+**The test that pins it.** `selftest.sh` now asserts `git stash push` **is**
+denied, in the same shape as the deliberate `echo git push` over-block, so that
+session six's carve-out turns the suite red instead of looking harmless. A second
+block asserts the escape hatches (`git stash`, `pop`, `list`, `save`) still pass
+— because an over-block is only survivable while a permitted path to the same
+local work exists, and a "fix" that hardened those away would be a real
+regression.
+
+**Where it lives.** The `DO NOT ADD A CARVE-OUT` block and `DEFAULT_REASON` in
+`core/deny-push.sh`, and the stash cases in the `── push guard ──` block of
+`selftest.sh`.
