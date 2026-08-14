@@ -209,7 +209,15 @@ for (const item of selected.filter((i) => i.scope === "repo-wide")) {
             id: item.id, title: item.title, source: item.source, severity: item.severity,
             files: item.files ?? [], newFiles: item.newFiles ?? [], detail: item.detail,
         }],
-        files: item.files ?? [],
+        // filesOf, NOT item.files. node.files becomes the builder's "files this
+        // node owns — do not edit anything else" list, so dropping newFiles here
+        // hands a builder an item that says CREATE this file inside a prompt that
+        // forbids touching it. The grouped path above has always used filesOf;
+        // this branch was written separately and never picked it up, so the bug
+        // reached repo-wide items ONLY — the rarest kind, and the ones least
+        // likely to expose it, because a repo-wide node already touches files the
+        // queue could not enumerate. Found 2026-08-14, brian-chastain batch 1.
+        files: [...new Set(filesOf(item))].sort(),
         serial: false,
         exclusive: true,
         lane: null,

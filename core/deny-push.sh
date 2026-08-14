@@ -104,6 +104,28 @@ flat=$(printf '%s' "$cmd" | tr '\n\t' '  ')
 # still fails closed on malformed input.
 flat=$(printf '%s' "$flat" | sed -E 's/"[^"$`]*"//g' | sed -E "s/'[^']*'//g")
 
+# Neutralise `git stash push` / `git stash save` BEFORE the match.
+#
+# WHY THIS IS NOT A HOLE. The subcommand is `stash`; it writes to the local stash
+# ref and takes pathspecs, not a remote. There is no form of `git stash push`
+# that contacts a remote, so nothing that reaches the human's boundary is being
+# allowed through. The replacement is a token with no `push` in it, so the
+# pattern below simply cannot see this occurrence — and every OTHER occurrence in
+# the same command line is still matched, because only this exact phrase is
+# consumed. `git stash push -m x && git push` remains DENIED on its second half.
+#
+# WHY IT MATTERS. `git stash push` is the modern spelling of `git stash`, and it
+# is the remedy pre-flight itself prints: "working tree DIRTY — commit or stash
+# before branching". The guard denied the fix its own sibling recommends, which
+# is the failure mode where a control teaches people to route around it. It fired
+# during brian-chastain batch 1 on `git stash push -q core/preflight.sh`, and
+# because the hook aborts the whole Bash call, it took an unrelated backup step
+# with it and destroyed an edit that had not been committed yet.
+#
+# The over-block on `echo git push` is DELIBERATE and stays (see below). This is
+# a different case: not an ambiguous literal, but an unambiguous local subcommand.
+flat=$(printf '%s' "$flat" | sed -E 's/git([[:space:]]+-[^[:space:]]+([[:space:]]+[^[:space:];&|]+)?)*[[:space:]]+stash[[:space:]]+(push|save)/git stash SUBCMD/g')
+
 # `git <anything that is not a command separator> push` — catches:
 #   git push                      git push --force            git push -f
 #   git -C /path push             git --git-dir=x push        git push --force-with-lease

@@ -152,14 +152,43 @@ if [ "$STACK" = "true" ]; then
         else
             stack_base=$(printf '%s\n' "$unpushed" | head -1)
             count=$(printf '%s\n' "$unpushed" | wc -l | tr -d ' ')
-            bad "UNPUSHED WORK EXISTS ($count branch(es)) — do NOT branch from $MAIN"
-            printf '%s\n' "$unpushed" | while read -r b; do
-                note "  $b  (+$(git rev-list --count "$REMOTE/$MAIN..$b") ahead of $REMOTE/$MAIN)"
-            done
-            note "STACK on the most recent instead:"
-            note "    git checkout -b <next-branch> $stack_base"
-            note "Branching from $MAIN here silently drops every one of those commits"
-            note "from your base — including the queue and any lockfile."
+
+            # ⚠ BEING ON THE STACK BASE IS THE SUCCESS STATE, NOT A FAULT.
+            #
+            # This block used to call bad() unconditionally whenever anything was
+            # unpushed. `branch` is computed above and was consulted ONLY in the
+            # nothing-unpushed path, so the one state the advice below exists to
+            # produce — standing on the newest unpushed branch — was reported ✗
+            # and pre-flight exited 1.
+            #
+            # That is worse than noise. The rule is "do not start a batch on a red
+            # pre-flight", so a red on the success case teaches the operator to run
+            # batches through a failing gate, and a genuine fault then looks exactly
+            # like the one they have learned to ignore. A check that cries wolf on
+            # the state it just recommended destroys the check.
+            #
+            # Found 2026-08-14 on brian-chastain batch 1, which was dispatched
+            # through a red pre-flight whose only complaint was the base it was
+            # correctly using.
+            if [ "$branch" = "$stack_base" ]; then
+                ok "on the stacking base '$branch' (+$(git rev-list --count "$REMOTE/$MAIN..$branch") ahead of $REMOTE/$MAIN)"
+                if [ "$count" -gt 1 ]; then
+                    note "$count branch(es) unpushed; '$branch' is the most recent, so this is the right base."
+                fi
+                note "Build this batch here. Do NOT branch from $MAIN until these land."
+            else
+                bad "UNPUSHED WORK EXISTS ($count branch(es)) — do NOT branch from $MAIN"
+                printf '%s\n' "$unpushed" | while read -r b; do
+                    note "  $b  (+$(git rev-list --count "$REMOTE/$MAIN..$b") ahead of $REMOTE/$MAIN)"
+                done
+                note "STACK on the most recent instead:"
+                note "    git checkout -b <next-branch> $stack_base"
+                note "Branching from $MAIN here silently drops every one of those commits"
+                note "from your base — including the queue and any lockfile."
+                if [ "$branch" != "$MAIN" ]; then
+                    note "You are on '$branch', which is not the newest unpushed branch."
+                fi
+            fi
         fi
     fi
 fi
@@ -174,6 +203,14 @@ if [ -n "$GUARD_MARKER" ]; then
         note "The PreToolUse hook stops AGENTS. This one guards the human, since a"
         note "habit is not a control."
     fi
+else
+    # SAY THAT THE CHECK DID NOT RUN. git.prePushGuard is null by default, and
+    # this block printed NOTHING AT ALL — so a project that never configured the
+    # guard produced pre-flight output identical to one where the guard was
+    # present and passing. Silence read as ✓. That is scar #8's shape applied to
+    # a check rather than a guard: an absent check must be visible as absent.
+    note "· pre-push guard: NOT CHECKED (git.prePushGuard is not configured)"
+    note "  Agents are still blocked by the PreToolUse hook; the human is not."
 fi
 
 # ── 6. queue state ───────────────────────────────────────────────────────────
