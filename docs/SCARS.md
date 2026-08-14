@@ -479,3 +479,171 @@ is green before and after asserts nothing.
 
 **Where it lives.** `core/preflight.sh` section 4, and the
 `── preflight: stacking base ──` block in `selftest.sh`.
+
+---
+
+## 17. A check that cries wolf on the success state destroys the check
+
+**What happened.** Scar #16 fixed the stacking guard's fail-open. The block it
+fixed then computed `stack_base` — the branch you are supposed to build on — and
+called `bad()` **unconditionally** whenever anything was unpushed. `branch` was
+read at the top of the section and consulted only in the *nothing-unpushed*
+path. So the single state the guard's own advice exists to produce — standing on
+the newest unpushed branch — printed ✗ and exited 1.
+
+brian-chastain batch 1 was dispatched through a red pre-flight whose only
+complaint was the base it was correctly using.
+
+**Why it was dangerous.** The skill says *do not start a batch on a red
+pre-flight*. A red on the success case makes that rule unfollowable, so the
+operator learns to read past the ✗ — and a genuine fault then arrives looking
+exactly like the one they have been trained to ignore. The failure is not the
+wrong colour; it is that the wrong colour **spends the operator's attention**,
+which is the only budget a gate actually draws on.
+
+> A guard that fires on the state it just recommended is not conservative. It is
+> teaching people to route around it, and it will be believed exactly once.
+
+**The fix.** Compare `branch` to `stack_base`. Equal → `ok`, with the lead count
+and a note not to branch from `main` until it lands. Not equal → the existing
+`bad()`, plus a line saying *which* branch you are on and that it is not the
+newest — because "you are on the wrong base" is unactionable without that.
+
+**The test that had to fail first.** The existing fixture checked out
+`feat/unpushed` and asserted `UNPUSHED WORK EXISTS` **from the stack base**, so
+it encoded the bug. Its intent — scar #6, *main is not a valid base while
+anything is unpushed* — is tested more faithfully from `main`, so the detection
+case now stands on `main`, and new cases cover the base itself. The fixture also
+grew a second, older unpushed branch with forced distinct commit times, since
+"most recent" is meaningless when two commits share a second.
+
+The exit code is asserted directly, which forced the fixture to become genuinely
+clean (harness and queue committed on `main` before branching). It had been
+exiting 1 for a dirty tree and a missing queue — conditions unrelated to the rule
+under test, and the reason the exit code had never been asserted at all.
+
+**Where it lives.** `core/preflight.sh` section 4, and the
+`── preflight: stacking base ──` block in `selftest.sh`.
+
+---
+
+## 18. A field the prompt does not render reaches nobody, silently
+
+**What happened.** `sprint-batch.mjs` renders exactly five item fields into the
+builder prompt (`id`, `severity`, `source`, `title`, `detail`) and exactly two
+into the verifier prompt (`title`, `detail`). Anything else on an item is
+dropped without a word.
+
+On brian-chastain batch 1 the operator re-scoped six items before dispatch —
+settled decisions, hazards, explicit do-not-touch lists, freshly re-verified
+evidence — and attached the result as a `sharpened` key beside `detail`. It
+would have reached no agent on any of the four nodes. It was caught by reading
+the prompt builder before launching, which is not a control.
+
+**Why it was dangerous.** The batch would have run. Every builder would have
+returned, every lens would have passed, every anchor would have been green, and
+the report would have been **indistinguishable** from one where the constraints
+were honoured. The operator would then have read "4/4 accepted" as evidence that
+work they had carefully scoped came back correct, when no agent had ever seen a
+line of it. This is scar #12 with the loss moved upstream: not green-but-wrong,
+but green-against-an-item-that-was-never-delivered.
+
+The `newFiles` half of the same contract had a real instance. `plan-batch.mjs`
+unions `files` + `newFiles` into `node.files` via `filesOf()` for grouped nodes,
+but the **repo-wide** branch was written separately and used `item.files` alone.
+`node.files` becomes the builder's *"files this node owns — do not edit anything
+else"* list, so a repo-wide item that must CREATE a file handed its builder a
+prompt forbidding the file it was told to create. Rarest node type, least likely
+to expose it: a repo-wide node already touches files the queue cannot enumerate,
+so a builder has no way to tell the omission from the normal case.
+
+> Two code paths that must agree, written at different times, will disagree. The
+> one that gets exercised least is the one that will be wrong.
+
+**The fix.** An explicit `ITEM_KEYS` allowlist, checked before any agent is
+spawned; an unknown key **throws**, naming `item.field` for every offender.
+Throwing rather than warning is the whole point — a warning scrolls past in a run
+that then looks successful. The cost of throwing is a launch that dies in seconds
+having spent zero tokens. The cost of warning is a plausible batch built against
+constraints nobody read. Same trade as scar #2: *unverified* must never be able
+to masquerade as *verified*.
+
+The repo-wide branch now uses `filesOf(item)`, and both prompts annotate created
+files — `[TO BE CREATED — does not exist yet]` for the builder, and a matching
+note for the verifier, since a file appearing only as an addition otherwise looks
+like a builder reaching outside its node, and "added a file it did not own" is a
+reject a verifier reaches for on sight.
+
+**Where it lives.** `ITEM_KEYS` and `newFilesOf()` in `core/sprint-batch.mjs`,
+the repo-wide node in `core/plan-batch.mjs`, and the `── item contract ──` block
+in `selftest.sh`.
+
+---
+
+## 19. Five sessions tried to widen the push guard. The guard was right.
+
+**What happened.** `git stash push` is denied. The pattern spans a git
+invocation's arguments so it can catch `git -C /path push`, and `stash` sits
+inside that same `[^;&|]*`. It reads as a publish.
+
+**Five separate sessions have independently proposed the same carve-out** —
+neutralise `git stash push|save` before the match. The argument is good every
+time: stash writes a local ref, takes pathspecs, and cannot contact a remote. A
+patch was written and it tested clean, allowing all six stash spellings while
+still denying `git stash push && git push`.
+
+**It was reverted, and that is the scar.**
+
+**Why.** The guard's entire value is that there is NO region of a command line
+where a `push` token is ignored. Every exemption is individually defensible and
+collectively fatal: each one enlarges the surface the pattern must reason about,
+and the next proposal always arrives with a slightly better argument than the
+last. Five sessions converging on the same relaxation is evidence the guard sits
+exactly where it hurts — which is where a guard belongs — not evidence it is
+misplaced. A rule argued down once is argued down again, and the sixth argument
+will be the one that is wrong.
+
+> The cost of a false positive is one command. The cost of a false negative is a
+> published repository under a real person's name. These are not comparable, and
+> a control that has survived five well-reasoned attacks should not fall to the
+> sixth.
+
+**The damage was never the deny.** The hook is `PreToolUse` on Bash, so a deny
+aborts the **entire tool call**, not the offending clause. The call was:
+
+```bash
+command cp core/preflight.sh "$BACKUP"   # ← never ran
+git stash push -q core/preflight.sh      # ← what tripped the guard
+```
+
+The backup was silently skipped. A later `git show HEAD:core/preflight.sh >
+core/preflight.sh` then wrote the old file over an edit that existed nowhere
+else. The stash deny cost one command; **putting it in the same call as the
+backup cost the work.**
+
+> Never put a guard-sensitive command in the same call as a step you cannot
+> afford to lose. That is a call-granularity rule. It is not a reason to move
+> the guard.
+
+**What to do instead** — recorded in `DEFAULT_REASON` so the *next* session reads
+it at the moment it is denied, rather than reading the pattern and reaching for
+sed:
+
+| need | use |
+|---|---|
+| stash the tree | `git stash` — bare is already allowed |
+| snapshot a file | `command cp <file> /tmp/<scratch>/<file>.bak` |
+| read an old revision | `git show HEAD:<path> > /tmp/<scratch>/old` — **never** over the working file |
+| compare a commit | `git worktree add --detach` |
+
+**The test that pins it.** `selftest.sh` now asserts `git stash push` **is**
+denied, in the same shape as the deliberate `echo git push` over-block, so that
+session six's carve-out turns the suite red instead of looking harmless. A second
+block asserts the escape hatches (`git stash`, `pop`, `list`, `save`) still pass
+— because an over-block is only survivable while a permitted path to the same
+local work exists, and a "fix" that hardened those away would be a real
+regression.
+
+**Where it lives.** The `DO NOT ADD A CARVE-OUT` block and `DEFAULT_REASON` in
+`core/deny-push.sh`, and the stash cases in the `── push guard ──` block of
+`selftest.sh`.

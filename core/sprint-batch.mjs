@@ -151,6 +151,44 @@ const setupLines = () => H.setup.length
     }).join('\n')
     : '    (none configured)';
 
+const newFilesOf = (node) => new Set(node.items.flatMap((it) => it.newFiles ?? []));
+
+// ── the item contract, asserted ──────────────────────────────────────────────
+// EVERY key an item may carry. buildPrompt renders id/severity/source/title/
+// detail; verifyPrompt renders title/detail; files and newFiles reach the agents
+// through node.files. Anything else in an item reaches NOBODY.
+//
+// WHY THIS THROWS INSTEAD OF WARNING. A dropped field is invisible in exactly
+// the way that matters: the batch still runs, every agent still returns, every
+// lens still passes, and the report is indistinguishable from one where the
+// field was honoured. On brian-chastain batch 1 the operator re-scoped six items
+// — settled decisions, hazards, explicit do-not-touch lists — onto a `sharpened`
+// key beside `detail`. It would have been discarded silently on all four nodes,
+// and the resulting green batch would have been read as "the constraints held"
+// when no agent had ever seen one. It was caught by reading the prompt builder,
+// which is not a control.
+//
+// The cost of throwing is a launch that fails in seconds having spent zero
+// tokens, with the offending key named. The cost of warning is a plausible batch
+// built against constraints nobody read. This is the same trade as scar #2:
+// unverified must not be able to masquerade as verified.
+const ITEM_KEYS = new Set(['id', 'title', 'source', 'severity', 'files', 'newFiles', 'detail']);
+const stray = [...new Set(
+    plan.nodes.flatMap((n) => (n.items ?? []).flatMap(
+        (it) => Object.keys(it).filter((k) => !ITEM_KEYS.has(k)).map((k) => `${it.id}.${k}`),
+    )),
+)];
+if (stray.length) {
+    throw new Error(
+        `sprint-batch: ${stray.length} item field(s) would reach no agent and were ` +
+        `silently dropped: ${stray.join(', ')}. Only ${[...ITEM_KEYS].join('/')} are ` +
+        `rendered into the builder and verifier prompts. Fold the content into ` +
+        `\`detail\` (which both prompts render in full), or extend ITEM_KEYS and the ` +
+        `prompt builders together. Refusing to launch: a batch that runs without a ` +
+        `constraint an operator wrote is greener than one that never had it.`,
+    );
+}
+
 function buildPrompt(node) {
     const branch = `${H.branchPrefix}/${BATCH}/${slug(node.nodeId)}`;
     return [
@@ -164,7 +202,7 @@ function buildPrompt(node) {
             : `This node holds one item.`,
         ``,
         `FILES THIS NODE OWNS (do not edit anything else):`,
-        ...node.files.map((f) => `  - ${f}`),
+        ...node.files.map((f) => `  - ${f}${newFilesOf(node).has(f) ? '   [TO BE CREATED — does not exist yet]' : ''}`),
         ``,
         `ITEMS:`,
         ...node.items.map((it) => [
@@ -203,7 +241,11 @@ function verifyPrompt(node, build, lens) {
         `BRANCH   : ${build.branch}`,
         `NODE     : ${node.nodeId}`,
         `FILES THIS NODE WAS ALLOWED TO TOUCH:`,
-        ...node.files.map((f) => `  - ${f}`),
+        // Mark the created ones for the verifier too. Without it, a file that
+        // legitimately appears only as an addition in the diff looks like a
+        // builder reaching outside its node, and "added a file it did not own"
+        // is a reject a verifier will reach for on sight.
+        ...node.files.map((f) => `  - ${f}${newFilesOf(node).has(f) ? '   [this node was required to CREATE this file]' : ''}`),
         ``,
         `THE ITEMS IT CLAIMED TO FIX:`,
         ...node.items.map((it) => `  ${it.id}: ${it.title}\n    evidence: ${it.detail ?? '(see title)'}`),

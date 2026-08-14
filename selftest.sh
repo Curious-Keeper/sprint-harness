@@ -232,6 +232,40 @@ else
     no "over-blocks unquoted 'echo git push' (deliberate — fails closed)"
 fi
 
+# `git stash push` IS DENIED, AND THAT IS PINNED HERE ON PURPOSE.
+#
+# Five separate sessions have proposed neutralising `git stash push` before the
+# match. It is individually defensible every time — stash takes pathspecs, not a
+# remote — and it is still refused, because the guard's whole value is that no
+# region of a command line gets a `push` token ignored. These assertions exist so
+# that session six's carve-out turns the suite red instead of looking harmless.
+#
+# The workaround belongs in the operator's hands, not in the pattern: `git stash`
+# bare is already allowed, `command cp` snapshots a file with no git verb at all,
+# and `git show HEAD:path > /tmp/...` reads an old revision. See DEFAULT_REASON.
+for cmd in \
+    "git stash push" \
+    "git stash push -q core/preflight.sh" \
+    'git stash push -m "wip"' \
+    "git -C /elsewhere stash push"
+do
+    if printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')" \
+        | "$G" | denies; then ok "over-blocks '$cmd' (deliberate — do not carve out)"
+    else no "over-blocks '$cmd' (deliberate — do not carve out)"; fi
+done
+# The spellings that do NOT contain the token are unaffected, which is what makes
+# the deny survivable: there is always a permitted way to do the same local work.
+for cmd in \
+    "git stash" \
+    "git stash pop" \
+    "git stash list" \
+    "git stash save wip"
+do
+    if printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')" \
+        | "$G" | denies; then no "still allows the escape hatch: $cmd"
+    else ok "still allows the escape hatch: $cmd"; fi
+done
+
 # INERT QUOTED REGIONS. The pattern spans a git invocation's arguments by design
 # (`git -C /path push`), so before the fix it also spanned a quoted argument and
 # denied `git commit -m "...push..."`. It fired on this repo's own history.
@@ -335,10 +369,28 @@ mkdir -p "$STK/src"; git init -q -b main "$STK"
 git -C "$STK" config user.email t@t.t; git -C "$STK" config user.name t
 echo x > "$STK/src/a.ts"; git -C "$STK" add -A; git -C "$STK" commit -qm init
 git -C "$STK" remote add origin "$ORIGIN"
-git -C "$STK" push -q -u origin main
-git -C "$STK" checkout -q -b feat/unpushed
-echo y > "$STK/src/b.ts"; git -C "$STK" add -A; git -C "$STK" commit -qm "not pushed"
+# Install and seed the queue ON MAIN, then push, so that every branch below
+# inherits a CLEAN tree with the harness and a queue present. Without this the
+# fixture is permanently dirty (untracked .claude/) and queue-less, so pre-flight
+# exits 1 for reasons that have nothing to do with the stacking rule — which
+# makes the exit code untestable, and the exit code is the whole point here.
 "$HERE/install.sh" "$STK" --stack node-web >/dev/null 2>&1
+mkdir -p "$STK/.claude/work"
+echo '{ "items": [] }' > "$STK/.claude/work/QUEUE.json"
+git -C "$STK" add -A; git -C "$STK" commit -qm "harness + queue"
+git -C "$STK" push -q -u origin main
+# TWO unpushed branches with FORCED distinct commit times, because the stack
+# base is "the most recent unpushed branch" and a same-second tie would make
+# which one wins depend on sort stability rather than on the rule.
+git -C "$STK" checkout -q -b feat/older
+echo w > "$STK/src/c.ts"; git -C "$STK" add -A
+GIT_AUTHOR_DATE="2026-08-14T10:00:00" GIT_COMMITTER_DATE="2026-08-14T10:00:00" \
+    git -C "$STK" commit -qm "older, not pushed"
+git -C "$STK" checkout -q main
+git -C "$STK" checkout -q -b feat/unpushed
+echo y > "$STK/src/b.ts"; git -C "$STK" add -A
+GIT_AUTHOR_DATE="2026-08-14T11:00:00" GIT_COMMITTER_DATE="2026-08-14T11:00:00" \
+    git -C "$STK" commit -qm "not pushed"
 
 # excludeFromStacking absent ENTIRELY — the shape the bug lived in.
 cat > "$TMP/stk-default.json" <<'JSON'
@@ -346,11 +398,19 @@ cat > "$TMP/stk-default.json" <<'JSON'
   "queue": { "path": ".claude/work/QUEUE.json" },
   "anchors": [ { "id": "t", "cmd": "true" } ] }
 JSON
+
+# FROM main — the state the guard exists to catch. This assertion used to run
+# from feat/unpushed, i.e. from the stacking base itself, which is the one
+# position where "do NOT branch from main" is advice the operator has ALREADY
+# taken. It passed only because the check was red in that case too. Running it
+# from main is strictly more faithful to scar #6: main is not a valid base while
+# anything is unpushed.
+git -C "$STK" checkout -q main
 stk_out=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-default.json" \
     ./.claude/harness-core/preflight.sh 2>&1)
 grep -q "UNPUSHED WORK EXISTS" <<< "$stk_out" \
-    && ok "preflight DETECTS an unpushed branch with no exclusion configured" \
-    || no "preflight DETECTS an unpushed branch with no exclusion configured"
+    && ok "preflight DETECTS unpushed branches when standing on main" \
+    || no "preflight DETECTS unpushed branches when standing on main"
 # Match the STACKING note specifically, not a bare branch name. A plain
 # "feat/unpushed" grep passes against the broken version too, because the
 # "on '<branch>'; branch the next batch from main" line also contains it —
@@ -359,12 +419,53 @@ grep -q "feat/unpushed  (+1 ahead of origin/main)" <<< "$stk_out" \
     && ok "preflight names the branch to stack on, with its lead count" \
     || no "preflight names the branch to stack on, with its lead count"
 
-# A branch that is ahead BY DESIGN must still be excluded.
+# ── being ON the stack base is the SUCCESS state ─────────────────────────────
+# Regression test for a cry-wolf found 2026-08-14 on brian-chastain batch 1.
+# The block computed stack_base and then called bad() unconditionally, so the
+# exact state its own advice tells you to reach — standing on the newest
+# unpushed branch — exited 1. The skill says "do not start a batch on a red
+# pre-flight", so a red on the success case teaches the operator to run batches
+# through a failing gate, and a real fault becomes indistinguishable from the
+# one they have learned to ignore.
+#
+# Asserted in BOTH directions, because a "fix" that simply stopped failing on
+# unpushed work would pass the green half alone — and would reinstate scar #6.
+git -C "$STK" checkout -q feat/unpushed
+stk_on_base=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-default.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+stk_on_base_rc=$?
+grep -q "on the stacking base 'feat/unpushed'" <<< "$stk_on_base" \
+    && ok "preflight is GREEN when already on the stacking base" \
+    || no "preflight is GREEN when already on the stacking base"
+! grep -q "UNPUSHED WORK EXISTS" <<< "$stk_on_base" \
+    && ok "preflight does not cry wolf on the base it just recommended" \
+    || no "preflight does not cry wolf on the base it just recommended"
+[ "$stk_on_base_rc" -eq 0 ] \
+    && ok "preflight EXITS 0 when standing on the stacking base" \
+    || no "preflight EXITS 0 when standing on the stacking base (got $stk_on_base_rc)"
+
+# An OLDER unpushed branch is still the wrong base: building there means the
+# newest unpushed work is not in your tree, which is scar #6 by another route.
+git -C "$STK" checkout -q feat/older
+stk_old=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-default.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+grep -q "UNPUSHED WORK EXISTS" <<< "$stk_old" \
+    && ok "preflight still RED on an unpushed branch that is not the newest" \
+    || no "preflight still RED on an unpushed branch that is not the newest"
+grep -q "not the newest unpushed branch" <<< "$stk_old" \
+    && ok "preflight says WHY the current branch is the wrong base" \
+    || no "preflight says WHY the current branch is the wrong base"
+git -C "$STK" checkout -q feat/unpushed
+
+# A branch that is ahead BY DESIGN must still be excluded. BOTH unpushed
+# branches are listed: the assertion is "nothing unpushed remains", so leaving
+# feat/older out would fail for the right reason and read like a broken
+# exclusion feature.
 cat > "$TMP/stk-excluded.json" <<'JSON'
 { "project": { "name": "stk", "mainBranch": "main", "remote": "origin" },
   "queue": { "path": ".claude/work/QUEUE.json" },
   "anchors": [ { "id": "t", "cmd": "true" } ],
-  "git": { "excludeFromStacking": ["feat/unpushed"] } }
+  "git": { "excludeFromStacking": ["feat/unpushed", "feat/older"] } }
 JSON
 stk_out2=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-excluded.json" \
     ./.claude/harness-core/preflight.sh 2>&1)
@@ -417,6 +518,77 @@ for s in "$HERE"/core/*.sh "$HERE/install.sh"; do
     bash -n "$s" 2>/dev/null || no "bash syntax: $(basename "$s")"
 done
 ok "all shell scripts parse"
+
+# ── the item contract reaches the agents ─────────────────────────────────────
+echo
+echo "── item contract ──"
+
+# newFiles must survive into node.files, which IS the builder's
+# "files this node owns — do not edit anything else" list. The grouped path has
+# always unioned it via filesOf(); the repo-wide branch was written separately
+# and used item.files alone, so a repo-wide item that CREATES a file handed its
+# builder a prompt forbidding the file it was told to create. Both scopes are
+# asserted — a fix applied to only one branch is the bug that was just found.
+NFR="$TMP/newfiles"; mkdir -p "$NFR/.claude/work"
+git init -q "$NFR"; git -C "$NFR" config user.email t@t.t; git -C "$NFR" config user.name t
+cat > "$NFR/.claude/harness.config.json" <<'JSON'
+{ "project": { "name": "nf", "mainBranch": "main", "remote": "origin" },
+  "queue": { "path": ".claude/work/QUEUE.json" },
+  "anchors": [ { "id": "t", "cmd": "true" } ] }
+JSON
+cat > "$NFR/.claude/work/QUEUE.json" <<'JSON'
+{ "items": [
+  { "id": "RW", "title": "repo-wide that creates a file", "status": "open", "severity": "low",
+    "files": ["src/a.ts"], "newFiles": ["src/made-by-rw.ts"], "scope": "repo-wide",
+    "scopeNote": "convention", "detail": "d", "dispatchable": true },
+  { "id": "GR", "title": "bounded that creates a file", "status": "open", "severity": "low",
+    "files": ["src/b.ts"], "newFiles": ["src/made-by-gr.ts"], "scope": "bounded",
+    "detail": "d", "dispatchable": true } ] }
+JSON
+git -C "$NFR" add -A >/dev/null 2>&1; git -C "$NFR" commit -qm init >/dev/null 2>&1
+nf_plan=$(cd "$NFR" && node "$HERE/core/plan-batch.mjs" RW GR --json 2>/dev/null)
+nf_missing=$(node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const p=JSON.parse(s), miss=[];
+  for (const n of p.nodes)
+    for (const f of n.items.flatMap(i => i.newFiles || []))
+      if (!n.files.includes(f)) miss.push(n.nodeId + ":" + f);
+  process.stdout.write(miss.join(","));
+});' <<< "$nf_plan")
+[ -z "$nf_missing" ] \
+    && ok "newFiles reaches node.files in every scope" \
+    || no "newFiles dropped from node.files ($nf_missing)"
+
+# An item field that no prompt renders must STOP the launch, not vanish. On
+# brian-chastain batch 1 six items were re-scoped onto a `sharpened` key beside
+# `detail`; every agent would have run without ever seeing it, and the resulting
+# all-green batch would have read as "the constraints held". Both directions:
+# a clean item must NOT trip it, or the assertion is just an outage.
+item_contract() {
+    node -e '
+const fs=require("fs");
+const src=fs.readFileSync(process.argv[1],"utf8").replace(/^export const meta/m,"const meta");
+const harness={anchors:[{id:"t",cmd:"true",cwd:".",always:true}],setup:[],lenses:["intent"],
+  requireAllLenses:true,agents:{},branchPrefix:"sprint",mainBranch:"main",pairedArtifacts:[]};
+const items=JSON.parse(process.argv[2]);
+const plan={nodes:[{nodeId:"N",items,files:["a.ts"],wave:0,serial:false,reason:"x"}],
+  harness,wave:0,batchName:"b",baseBranch:"base"};
+const f=new Function("args","agent","parallel","pipeline","log","phase","budget","workflow",
+  "return (async()=>{"+src+"})()");
+f(plan,()=>{},()=>{},()=>{},()=>{},()=>{},{},()=>{})
+  .then(()=>process.exit(0))
+  .catch(e=>process.exit(/would reach no agent/.test(e.message)?7:0));
+' "$HERE/core/sprint-batch.mjs" "$1" 2>/dev/null
+    return $?
+}
+CLEAN_ITEM='[{"id":"A","title":"t","source":"s","severity":"low","files":["a.ts"],"newFiles":[],"detail":"d"}]'
+STRAY_ITEM='[{"id":"A","title":"t","source":"s","severity":"low","files":["a.ts"],"newFiles":[],"detail":"d","sharpened":{"x":1}}]'
+item_contract "$STRAY_ITEM"; [ $? -eq 7 ] \
+    && ok "sprint-batch REFUSES an item field no prompt renders" \
+    || no "sprint-batch REFUSES an item field no prompt renders"
+item_contract "$CLEAN_ITEM"; [ $? -ne 7 ] \
+    && ok "sprint-batch accepts the documented item keys" \
+    || no "sprint-batch accepts the documented item keys"
 
 # The graph builds its JSON schema from the anchor ids in the plan, so an anchor
 # id that is not a bare word would produce an invalid schema at dispatch time —

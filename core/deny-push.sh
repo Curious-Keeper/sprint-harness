@@ -78,7 +78,19 @@ no --force-with-lease, no 'git -C <path> push', no push inside a chained command
 A push is the one action that leaves the human's reach. A green anchor set is not
 evidence a change is right; only a rebuilt, hands-on-verified running app is.
 
-If a push is genuinely required, say so and STOP. Do not work around this."
+If a push is genuinely required, say so and STOP. Do not work around this.
+
+DENIED ON 'git stash push'? That over-block is DELIBERATE and is not going to be
+relaxed — five sessions have proposed the same carve-out. Do NOT edit this guard.
+Use one of these instead:
+  * 'git stash' bare is already allowed; only the 'push' spelling trips this.
+  * snapshot a file : command cp <file> /tmp/<scratch>/<file>.bak
+  * read an old rev : git show HEAD:<path> > /tmp/<scratch>/old   (never over the
+                      working file — that is how an uncommitted edit gets lost)
+  * compare a commit: git worktree add --detach
+
+And issue it ALONE. This hook denies the ENTIRE Bash call, so anything sharing
+the call — a backup, a copy you were about to rely on — never runs either."
 
 # Normalise so 'git\npush' and 'git    push' read the same as 'git push'.
 flat=$(printf '%s' "$cmd" | tr '\n\t' '  ')
@@ -103,6 +115,36 @@ flat=$(printf '%s' "$cmd" | tr '\n\t' '  ')
 # Unbalanced quotes match nothing and are therefore not stripped — the guard
 # still fails closed on malformed input.
 flat=$(printf '%s' "$flat" | sed -E 's/"[^"$`]*"//g' | sed -E "s/'[^']*'//g")
+
+# ⛔ DO NOT ADD A CARVE-OUT FOR `git stash push`. FIVE SESSIONS HAVE TRIED.
+#
+# `git stash push` is denied, because `stash` sits inside the `[^;&|]*` that lets
+# this pattern span `git -C /path push`. That over-block is ACCEPTED, not a bug
+# to be fixed, and the reasoning is the same as the `echo git push` case below.
+#
+# The tempting patch is to neutralise `git stash push|save` before the match. It
+# even tests clean. Reject it anyway: every exemption widens the region this
+# pattern must reason about, each one is individually defensible, and the guard's
+# entire value is that it has NO region where a `push` token is ignored. Five
+# separate sessions have independently proposed this exact carve-out — which is
+# evidence the guard is load-bearing and the sessions are wrong, not that the
+# rule needs relaxing. A guard argued down once is argued down again.
+#
+# WHAT TO DO INSTEAD — the deny is not the thing that hurts you:
+#
+#   * `git stash` bare is ALREADY ALLOWED. Only the `push` spelling trips it.
+#   * To snapshot a file, use `command cp file /tmp/.../file.bak`. No git verb,
+#     no guard surface, and it survives a checkout that stash does not.
+#   * To read an old version, `git show HEAD:path > /tmp/.../old` — but WRITE IT
+#     SOMEWHERE ELSE, never over the working file.
+#   * To compare against another commit, `git worktree add --detach`.
+#
+# AND THE PART THAT ACTUALLY CAUSED DAMAGE: this is a PreToolUse hook, so a deny
+# aborts the WHOLE Bash call, not the offending clause. During brian-chastain
+# batch 1 a backup and a stash were issued in ONE call; the deny killed both, and
+# a later restore then overwrote an uncommitted edit that now existed nowhere.
+# NEVER put a guard-sensitive command in the same call as a step you cannot
+# afford to lose. That is a call-granularity rule, not a reason to move the guard.
 
 # `git <anything that is not a command separator> push` — catches:
 #   git push                      git push --force            git push -f
