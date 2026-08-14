@@ -99,31 +99,68 @@ fi
 # recent one. main is only a valid base when NOTHING is unpushed.
 if [ "$STACK" = "true" ]; then
     branch=$(git rev-parse --abbrev-ref HEAD)
-    excluded=$(jq -r '[.git.excludeFromStacking[]?] | join("\n")' "$CFG" 2>/dev/null)
+    mapfile -t excluded < <(jq -r '.git.excludeFromStacking[]? // empty' "$CFG" 2>/dev/null)
 
-    unpushed=$(git for-each-ref --format='%(refname:short)' refs/heads/ \
-        | grep -v -x -e "$MAIN" $(printf -- '-e %s ' $excluded) 2>/dev/null \
-        | while read -r b; do
-              [ -n "$b" ] || continue
-              if [ "$(git rev-list --count "$REMOTE/$MAIN..$b" 2>/dev/null || echo 0)" -gt 0 ]; then
-                  printf '%s %s\n' "$(git log -1 --format=%ct "$b")" "$b"
-              fi
-          done | sort -rn | awk '{print $2}')
-
-    if [ -z "$unpushed" ]; then
-        ok "nothing unpushed — $MAIN is a valid base"
-        [ "$branch" = "$MAIN" ] || note "on '$branch'; branch the next batch from $MAIN."
+    # ⚠ THE EXCLUSION IS APPLIED IN THE LOOP, NOT BY grep, AND THIS IS NOT STYLE.
+    #
+    # Do not "simplify" this back to the original:
+    #
+    #     | grep -v -x -e "$MAIN" $(printf -- '-e %s ' $excluded) 2>/dev/null
+    #
+    # When git.excludeFromStacking is EMPTY — the DEFAULT, and what every new
+    # install has — that expands to a DANGLING `-e`. grep exits 2 with "option
+    # requires an argument", the 2>/dev/null swallows the message, `unpushed`
+    # comes back empty, and this block prints "nothing unpushed — main is a
+    # valid base" while unpushed branches sit right there. It FAILS OPEN, which
+    # defeats the entire scar this section exists for: the next batch then gets
+    # planned against a queue and a lockfile the day has already moved past.
+    #
+    # Two things made it survive: the exclusion list is normally empty, so the
+    # bug is in the DEFAULT path, not an edge case; and it reproduces only under
+    # bash. zsh does not word-split an unquoted command substitution, so
+    # checking the pipeline by hand in an interactive zsh shell shows a pass.
+    # Verify a shell script under its own shebang.
+    #
+    # Found 2026-08-14 on a repo with four unpushed commits that pre-flight
+    # declared a valid base.
+    if ! git rev-parse --verify --quiet "$REMOTE/$MAIN" >/dev/null; then
+        # Fail CLOSED. Without the remote ref every branch would compare against
+        # nothing, every comparison would be skipped, and the empty result would
+        # read exactly like "nothing unpushed".
+        bad "$REMOTE/$MAIN does not exist — cannot prove what is unpushed"
+        note "fetch it, or correct project.remote / project.mainBranch"
     else
-        stack_base=$(printf '%s\n' "$unpushed" | head -1)
-        count=$(printf '%s\n' "$unpushed" | wc -l | tr -d ' ')
-        bad "UNPUSHED WORK EXISTS ($count branch(es)) — do NOT branch from $MAIN"
-        printf '%s\n' "$unpushed" | while read -r b; do
-            note "  $b  (+$(git rev-list --count "$REMOTE/$MAIN..$b") ahead of $REMOTE/$MAIN)"
-        done
-        note "STACK on the most recent instead:"
-        note "    git checkout -b <next-branch> $stack_base"
-        note "Branching from $MAIN here silently drops every one of those commits"
-        note "from your base — including the queue and any lockfile."
+        unpushed=$(
+            git for-each-ref --format='%(refname:short)' refs/heads/ |
+            while IFS= read -r b; do
+                [ -n "$b" ] || continue
+                [ "$b" = "$MAIN" ] && continue
+                if [ "${#excluded[@]}" -gt 0 ]; then
+                    for ex in "${excluded[@]}"; do
+                        [ "$b" = "$ex" ] && continue 2
+                    done
+                fi
+                ahead=$(git rev-list --count "$REMOTE/$MAIN..$b" 2>/dev/null) || continue
+                [ "${ahead:-0}" -gt 0 ] || continue
+                printf '%s %s\n' "$(git log -1 --format=%ct "$b")" "$b"
+            done | sort -rn | awk '{print $2}'
+        )
+
+        if [ -z "$unpushed" ]; then
+            ok "nothing unpushed — $MAIN is a valid base"
+            [ "$branch" = "$MAIN" ] || note "on '$branch'; branch the next batch from $MAIN."
+        else
+            stack_base=$(printf '%s\n' "$unpushed" | head -1)
+            count=$(printf '%s\n' "$unpushed" | wc -l | tr -d ' ')
+            bad "UNPUSHED WORK EXISTS ($count branch(es)) — do NOT branch from $MAIN"
+            printf '%s\n' "$unpushed" | while read -r b; do
+                note "  $b  (+$(git rev-list --count "$REMOTE/$MAIN..$b") ahead of $REMOTE/$MAIN)"
+            done
+            note "STACK on the most recent instead:"
+            note "    git checkout -b <next-branch> $stack_base"
+            note "Branching from $MAIN here silently drops every one of those commits"
+            note "from your base — including the queue and any lockfile."
+        fi
     fi
 fi
 

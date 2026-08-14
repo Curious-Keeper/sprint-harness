@@ -313,6 +313,78 @@ echo "// not a component" >> "$REPO/src/shared.ts"
 git -C "$REPO" commit -qam "chore: touch a non-matching file"
 expect "ignores files outside the rule's srcDir/srcExt" 0 "$GATE" main
 
+# ── preflight: the stacking base ─────────────────────────────────────────────
+#
+# REGRESSION TEST for a fail-open found 2026-08-14. The unpushed-branch check
+# built its grep exclusion as `$(printf -- '-e %s ' $excluded)`, which with an
+# EMPTY excludeFromStacking — the DEFAULT — left a dangling `-e`. grep exited 2
+# with "option requires an argument", `2>/dev/null` hid the message, and
+# pre-flight printed "nothing unpushed — main is a valid base" while unpushed
+# branches sat right there. That is scar #6's guard defeated by scar #8's
+# mechanism, in the default configuration.
+#
+# It needs a REAL remote to exercise, which is exactly why the main fixture
+# (no remote) never caught it. Both directions are asserted: the default must
+# DETECT, and a configured exclusion must still EXCLUDE — a "fix" that simply
+# dropped the exclusion feature would pass the first assertion on its own.
+echo
+echo "── preflight: stacking base ──"
+STK="$TMP/stacked"; ORIGIN="$TMP/origin.git"
+git init -q --bare "$ORIGIN"
+mkdir -p "$STK/src"; git init -q -b main "$STK"
+git -C "$STK" config user.email t@t.t; git -C "$STK" config user.name t
+echo x > "$STK/src/a.ts"; git -C "$STK" add -A; git -C "$STK" commit -qm init
+git -C "$STK" remote add origin "$ORIGIN"
+git -C "$STK" push -q -u origin main
+git -C "$STK" checkout -q -b feat/unpushed
+echo y > "$STK/src/b.ts"; git -C "$STK" add -A; git -C "$STK" commit -qm "not pushed"
+"$HERE/install.sh" "$STK" --stack node-web >/dev/null 2>&1
+
+# excludeFromStacking absent ENTIRELY — the shape the bug lived in.
+cat > "$TMP/stk-default.json" <<'JSON'
+{ "project": { "name": "stk", "mainBranch": "main", "remote": "origin" },
+  "queue": { "path": ".claude/work/QUEUE.json" },
+  "anchors": [ { "id": "t", "cmd": "true" } ] }
+JSON
+stk_out=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-default.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+grep -q "UNPUSHED WORK EXISTS" <<< "$stk_out" \
+    && ok "preflight DETECTS an unpushed branch with no exclusion configured" \
+    || no "preflight DETECTS an unpushed branch with no exclusion configured"
+# Match the STACKING note specifically, not a bare branch name. A plain
+# "feat/unpushed" grep passes against the broken version too, because the
+# "on '<branch>'; branch the next batch from main" line also contains it —
+# an assertion that is green before and after asserts nothing.
+grep -q "feat/unpushed  (+1 ahead of origin/main)" <<< "$stk_out" \
+    && ok "preflight names the branch to stack on, with its lead count" \
+    || no "preflight names the branch to stack on, with its lead count"
+
+# A branch that is ahead BY DESIGN must still be excluded.
+cat > "$TMP/stk-excluded.json" <<'JSON'
+{ "project": { "name": "stk", "mainBranch": "main", "remote": "origin" },
+  "queue": { "path": ".claude/work/QUEUE.json" },
+  "anchors": [ { "id": "t", "cmd": "true" } ],
+  "git": { "excludeFromStacking": ["feat/unpushed"] } }
+JSON
+stk_out2=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-excluded.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+grep -q "nothing unpushed" <<< "$stk_out2" \
+    && ok "excludeFromStacking still excludes" \
+    || no "excludeFromStacking still excludes"
+
+# Fail CLOSED when the remote ref is missing: without it every comparison is
+# skipped, and an empty result reads exactly like "nothing unpushed".
+cat > "$TMP/stk-badremote.json" <<'JSON'
+{ "project": { "name": "stk", "mainBranch": "main", "remote": "nosuchremote" },
+  "queue": { "path": ".claude/work/QUEUE.json" },
+  "anchors": [ { "id": "t", "cmd": "true" } ] }
+JSON
+stk_out3=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-badremote.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+grep -q "cannot prove what is unpushed" <<< "$stk_out3" \
+    && ok "preflight fails closed when the remote ref is missing" \
+    || no "preflight fails closed when the remote ref is missing"
+
 # ── preflight + workflow syntax ──────────────────────────────────────────────
 echo
 echo "── preflight / syntax ──"

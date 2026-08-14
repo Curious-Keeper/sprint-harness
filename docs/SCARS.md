@@ -417,3 +417,65 @@ five smuggling attempts that must still deny, including the apostrophe case abov
 lives in that region. And when you relax a guard for usability, write the
 smuggling tests *first* — the relaxation is only safe if you can state exactly
 what it cannot let through.
+
+---
+
+## 16. The stacking guard failed open in its DEFAULT configuration
+
+**What happened.** Scar #6's check — "main is not a valid base while anything is
+unpushed" — reported `✓ nothing unpushed — main is a valid base` on a repo whose
+current branch was four commits ahead of `origin/main`. It had presumably been
+doing that on every project since it was written.
+
+The line:
+
+```bash
+excluded=$(jq -r '[.git.excludeFromStacking[]?] | join("\n")' "$CFG")
+... | grep -v -x -e "$MAIN" $(printf -- '-e %s ' $excluded) 2>/dev/null | ...
+```
+
+With `excludeFromStacking` **empty** — the default, and what every new install
+has — `printf` receives no arguments, emits `-e ` once, and the unquoted command
+substitution collapses to a single dangling `-e`. grep exits **2** with `option
+requires an argument`, `2>/dev/null` swallows the message, `unpushed` comes back
+empty, and empty is indistinguishable from "nothing to report".
+
+**Why it was dangerous.** It is scar #6's guard defeated by scar #8's mechanism,
+and it lived in the path that **every** install takes. A non-empty
+`excludeFromStacking` accidentally *fixed* it, so the more configured a project
+was, the more likely the guard actually worked. Branching from `main` here
+silently drops every unpushed commit from your base — including the queue and
+the lockfile.
+
+**The part worth internalising, which is not the grep.** The first attempt to
+reproduce it *passed*. The check was run by hand in an interactive **zsh**, and
+zsh does not word-split an unquoted command substitution — so the dangling `-e`
+never formed and grep behaved. The bug only exists under the `#!/usr/bin/env
+bash` the script actually runs with.
+
+> **Verify a shell script under its own shebang.** A hand-check in your login
+> shell is not a test of a bash script, and it fails in the direction that tells
+> you everything is fine.
+
+**The fix.** Filter in the loop, not with grep — there is no option to dangle.
+Resolve the exclusion list with `mapfile` into an array so a branch name with a
+space cannot re-introduce word-splitting. And check `$REMOTE/$MAIN` resolves
+*before* the loop, because without it every comparison is skipped and the empty
+result reads exactly like "nothing unpushed".
+
+**The test that had to fail first.** `selftest.sh` had no fixture with a remote,
+which is precisely why this survived — the existing preflight assertions all run
+against a repo with no remote, where the stacking check cannot say anything. The
+new case builds a bare origin, pushes `main`, leaves a branch ahead, and asserts
+both directions: an empty exclusion list must **detect**, and a configured one
+must still **exclude**. A "fix" that simply deleted the exclusion feature would
+pass the first assertion alone.
+
+A first draft of that test asserted only that the branch name appeared in the
+output — and it passed against the broken version too, because the unrelated
+`on '<branch>'; branch the next batch from main` line also contains it. It now
+matches the stacking note and its lead count. Scar #13 in miniature: a test that
+is green before and after asserts nothing.
+
+**Where it lives.** `core/preflight.sh` section 4, and the
+`── preflight: stacking base ──` block in `selftest.sh`.
