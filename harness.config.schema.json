@@ -1,6 +1,6 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://github.com/local/sprint-harness/harness.config.schema.json",
+    "$id": "https://github.com/Curious-Keeper/sprint-harness/harness.config.schema.json",
     "title": "sprint-harness configuration",
     "description": "The single file that makes the harness portable. Everything project-specific that core/ needs lives here; nothing project-specific lives in core/.",
     "type": "object",
