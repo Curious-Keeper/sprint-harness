@@ -15,6 +15,11 @@ that was never project-specific, separated from the parts that always will be.
 
 ## The model
 
+<img width="1200" height="630" alt="og-diamond" src="https://github.com/user-attachments/assets/333c84d5-a546-49c7-9c50-219d0762429a" />
+
+
+### Full Graph
+
 ```
   your list ─→ [intake] ─→ QUEUE.json
                               │
@@ -94,11 +99,13 @@ docs/
 The kit stays here. It installs **into** a project — you never copy or paste it in.
 
 ```bash
-cd /path/to/your-existing-project
-git checkout -b chore/sprint-harness
-~/git_projects/sprint-harness/install.sh . --stack node-web
+git clone # clone this repo wherever you want to store the full harness and examples, etc...
+cd /path/to/your-existing-project # go to whichever project you want to use the harness in
+git checkout -b chore/sprint-harness # create a harness branch for initial setup
+~/git_projects/sprint-harness/install.sh . --stack node-web # read the runbook along side your install for steps
 
-git add .claude && git commit -m "chore: install sprint harness"
+git add .claude && git commit -m "chore: install sprint harness" # This can't be skipped
+ # the agents can only see/use what is tracked because they fan out using worktrees. Not tracked = broken
 ```
 
 That second command is load-bearing. Builders run in git worktrees, which
