@@ -7,8 +7,9 @@ Extracted from a working harness on a Next.js + Supabase client project that
 shipped nine batches through it. This repo is the generalisation: the machinery
 that was never project-specific, separated from the parts that always will be.
 
-> **Not a framework.** It is ~1200 lines of plain code and four documents. The
-> documents are the more valuable half.
+> **Not a framework.** It is ~1700 lines of plain code — 1026 of them excluding
+> comments and blanks — and six documents. The documents are the more valuable
+> half.
 
 ---
 
@@ -81,7 +82,7 @@ docs/
   RUNBOOK.md                ← start here: new project → first batch, 4–6 sessions
   RUNBOOK-SMALL.md          compressed path for 1–3 surfaces, + the sizing fork
   MAP_GUIDE.md              how to write the map, with real before/after
-  SCARS.md                  ← then this: 14 failures and the guards they produced
+  SCARS.md                  ← then this: 19 failures and the guards they produced
   DESIGN.md                 what generalises, what cannot, and known gaps
   PORTING.md                per-step detail, and how to tell if it's working
 ```
@@ -107,6 +108,13 @@ not fail, it *is not there*. `install.sh` refuses quietly to let that pass: it
 checks and stops you loudly.
 
 Then open a session in that project and paste the first prompt.
+
+> **`templates/` stays in this clone; it is not copied into your project, and
+> that is intentional.** The prompts and [`MAP.skeleton.json`](templates/MAP.skeleton.json)
+> are adoption material for *you*, not runtime material for the harness — nothing
+> in `core/` reads them. Keep this repo checked out somewhere while you work
+> through the runbook and reference them from here; the paths in the docs assume
+> `~/git_projects/sprint-harness`, so adjust if you cloned elsewhere.
 
 Then follow [**docs/RUNBOOK.md**](docs/RUNBOOK.md) — 4–6 sessions to a first green
 batch, with a copy-paste prompt per phase in
@@ -153,7 +161,7 @@ them.
 
 ## Read SCARS.md
 
-[docs/SCARS.md](docs/SCARS.md) is fourteen failures, each with the design decision
+[docs/SCARS.md](docs/SCARS.md) is nineteen failures, each with the design decision
 it produced. A sample:
 
 - **Lost structured output manufactured five false negatives.** 7 of 18 verifiers
@@ -189,7 +197,35 @@ The coordination is overhead unless the work is wide.
 
 ## Status
 
-Working code, extracted and generalised; `core/` runs and is exercised by
-`selftest.sh`. It has not yet driven a full batch under its generalised config —
-the original did, nine times. Known gaps are listed honestly at the end of
-[docs/DESIGN.md](docs/DESIGN.md).
+Working code, extracted and generalised. `core/` runs and is exercised by
+`selftest.sh` — 81 assertions, currently green.
+
+**Batches driven under the generalised config: two.** Both on a small Astro site
+with no test suite and no linter, which is a useful stress of the "anchors are
+whatever exits non-zero" claim:
+
+| batch | dispatched | nodes | waves | rejected |
+|---|---|---|---|---|
+| batch-1 | 6 | 4 | 1 | 0 |
+| batch-2 | 6 | 5 | 1 | 0 |
+
+Those two batches produced scars 17, 18 and 19. The original, project-specific
+version drove nine.
+
+**Read the acceptance rate as a gap, not a result.** 10 of 10 nodes accepted
+first-pass means the lenses agreed with the builders; it does not mean the
+builders were right, and it does not show the harness catching bad work, because
+**it has not yet been given any.** The one run that genuinely exercised the verify
+stage is the batch where 3 of 3 nodes were green on every anchor and all 3 were
+rejected on semantics — and that ran under the original, not this.
+
+Known gaps are listed honestly at the end of [docs/DESIGN.md](docs/DESIGN.md).
+
+---
+
+## License
+
+[MPL-2.0](LICENSE). File-level copyleft: keep the notice, and publish your
+changes *to these files*. Deliberately **not** GPL — `install.sh` copies `core/`
+into your repository, and a whole-work copyleft would reach the project you
+installed it into. Your code stays yours; the harness stays open.
