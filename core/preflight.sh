@@ -17,6 +17,13 @@
 set -uo pipefail
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "error: not in a git repo" >&2; exit 2; }
+# Where this script actually lives, relative to the repo root. The closing advice
+# names a command the operator is meant to RUN, and printing the kit's own layout
+# to a project that installed it into .claude/harness-core/ names a path that is
+# not there.
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SELFDIR=${HERE#"$ROOT"/}
+[ "$SELFDIR" = "$HERE" ] && SELFDIR="core"
 cd "$ROOT" || exit 2
 
 CFG=""
@@ -283,7 +290,7 @@ fi
 
 echo
 if [ "$fail" -eq 0 ]; then
-    echo "Ready. Pick a batch:  node core/plan-batch.mjs --auto 8"
+    echo "Ready. Pick a batch:  node $SELFDIR/plan-batch.mjs --auto 8"
 else
     echo "NOT ready — fix the ✗ items above before branching."
 fi
