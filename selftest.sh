@@ -235,6 +235,30 @@ dcheck "a dot-directory inside prose still matches" \
     '.midSentence|join(",")' ".circleci/config.yml"
 dcheck "the path is not ALSO matched one char in" '.noDoubleMatch' 1
 
+# PROSE PUNCTUATION vs A REAL BRACKET. PATH_BODY admits ( and [ because real
+# paths contain them (Next.js route groups, dynamic segments), and LEFT_EDGE lets
+# a match START on one — required for a dot-directory. Ordinary prose then gets
+# glued on: "no overflow container (carriers/[id]/page.tsx" captured the paren
+# and suffix-matched nothing, dropping the citation. Same silent edge loss the
+# dot-directory fix above exists to prevent, reached through that very fix.
+# Found 2026-08-21 on allrail-ops-next, on the first run after installing it.
+par_out=$(node --input-type=module -e '
+import { citedFiles, buildResolver }
+    from "'"$REPO"'/.claude/harness-core/lib/extract.mjs";
+const tracked = ["web/app/(app)/carriers/[id]/page.tsx", "web/app/(app)/orders/page.tsx", "src/a.ts"];
+const r = buildResolver(tracked);
+console.log(JSON.stringify({
+    parenProse: citedFiles("no overflow container (carriers/[id]/page.tsx, two tables)", r).files,
+    routeGroup: citedFiles("the list lives at (app)/orders/page.tsx today", r).files,
+    stillDrops: citedFiles("nothing here", r).files.length,
+}));' 2>&1)
+pcheck() { local got; got=$(jq -r "$2" <<< "$par_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pcheck "a paren from PROSE is trimmed off the path" \
+    '.parenProse|join(",")' "web/app/(app)/carriers/[id]/page.tsx"
+pcheck "...but a route group the path CLOSES is kept whole" \
+    '.routeGroup|join(",")' "web/app/(app)/orders/page.tsx"
+
 cat > "$TMP/badext.json" <<'JSON'
 { "project": { "name": "x", "mainBranch": "main" }, "queue": { "path": "q.json" },
   "anchors": [ { "id": "t", "cmd": "true" } ],
