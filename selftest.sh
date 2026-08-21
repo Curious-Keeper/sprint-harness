@@ -1048,6 +1048,25 @@ grep -q "on the stacking base 'feat/unpushed'" <<< "$stk_on_base" \
     && ok "preflight EXITS 0 when standing on the stacking base" \
     || no "preflight EXITS 0 when standing on the stacking base (got $stk_on_base_rc)"
 
+# A FRESHLY CUT branch points at the same commit as the base it came from, and
+# `git log -1 --format=%ct` is identical for both — so which one sorts first is
+# arbitrary. A name-only comparison reports the correct base as "not the newest"
+# and goes red on a tree that is in exactly the right state: scar #17 again, one
+# step later. Standing on either is equivalent for what the NEXT commit is based
+# on, so both must be green.
+git -C "$STK" checkout -q -b chore/next feat/unpushed
+stk_fresh=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-default.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+stk_fresh_rc=$?
+! grep -q "UNPUSHED WORK EXISTS" <<< "$stk_fresh" \
+    && ok "preflight is GREEN on a branch cut from the stacking base (same commit)" \
+    || no "preflight is GREEN on a branch cut from the stacking base (same commit)"
+[ "$stk_fresh_rc" -eq 0 ] \
+    && ok "preflight EXITS 0 on a same-commit stacking base" \
+    || no "preflight EXITS 0 on a same-commit stacking base (got $stk_fresh_rc)"
+git -C "$STK" checkout -q feat/unpushed
+git -C "$STK" branch -qD chore/next
+
 # An OLDER unpushed branch is still the wrong base: building there means the
 # newest unpushed work is not in your tree, which is scar #6 by another route.
 git -C "$STK" checkout -q feat/older

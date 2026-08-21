@@ -170,7 +170,20 @@ if [ "$STACK" = "true" ]; then
             # Found 2026-08-14 on brian-chastain batch 1, which was dispatched
             # through a red pre-flight whose only complaint was the base it was
             # correctly using.
-            if [ "$branch" = "$stack_base" ]; then
+            # COMPARE BY COMMIT, NOT ONLY BY NAME. Two branches can point at the
+            # same commit — a freshly stacked branch and the base it was cut from
+            # do exactly that until the first commit lands on it. `git log -1
+            # --format=%ct` is then identical for both, so which one sorts first
+            # is arbitrary, and a name-only comparison reports the correct base as
+            # "not the newest": scar #17's cry-wolf shape, reached one step later.
+            #
+            # Standing on either is equivalent for the only thing this check cares
+            # about — what the NEXT commit will be based on.
+            #
+            # Found 2026-08-14 on allrail-ops-next while backporting the #17 fix,
+            # which is why it exists downstream and not here.
+            if [ "$branch" = "$stack_base" ] \
+               || [ "$(git rev-parse "$branch" 2>/dev/null)" = "$(git rev-parse "$stack_base" 2>/dev/null)" ]; then
                 ok "on the stacking base '$branch' (+$(git rev-list --count "$REMOTE/$MAIN..$branch") ahead of $REMOTE/$MAIN)"
                 if [ "$count" -gt 1 ]; then
                     note "$count branch(es) unpushed; '$branch' is the most recent, so this is the right base."
