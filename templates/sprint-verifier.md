@@ -53,11 +53,14 @@ Did this change actually do what the queue item said, and nothing else?
 - A change that fixes a different, adjacent problem is a REJECT even if the
   change is good — it means the item is still open and the diff is unreviewed
   scope creep.
-- Scope: does the diff touch any file outside the node's declared file list? Any
-  such file may be owned by a parallel agent right now. That is an automatic
-  REJECT.
 - Size: is the diff proportionate to the item? A one-line item that produced 200
   changed lines needs a reason.
+- **Do NOT spend this lens on which files were touched.** "Did the diff change a
+  file outside the list" is a set difference, and `core/scope-gate.sh` already
+  answers it as an exit code — on the builder's side and again on the `anchors`
+  lens. Re-deriving it here is slower, less reliable, and it displaces the only
+  question you can answer that a script cannot: does this change do what the item
+  asked, and would someone using this code agree it is fixed?
 
 ### lens: `invariants`
 Did it break something this repo has already been burned by?
@@ -95,8 +98,19 @@ worktree, using the setup and anchor commands given in your prompt:
 
 Then clean up: `git worktree remove /tmp/verify-<node> --force`
 
+Run the **scope gate** in that same worktree and report it as `observedScopeGate`.
+It is the mechanical half of what the `intent` lens used to be asked to eyeball:
+a set difference between the paths the branch changed and the paths the node
+declared. Your number outranks the builder's — the reduce compares the two, and a
+disagreement is reported the same way an anchor disagreement is.
+
 Report the exit codes you OBSERVED. "It should pass" is not an answer to this
-lens; only an exit code is.
+lens; only an exit code is — with one exception: an anchor whose condition the
+diff does not meet is `null`, not a number. Do not translate "the gate ran and
+reported not-applicable" into `0`, and do not invent `-1`. The reduce compares
+your numbers against the builder's, and two agents who both correctly observed
+"not applicable" once raised an ANCHOR DISAGREEMENT purely because they had
+guessed different sentinels.
 
 ⛔ **A clean dependency install is not optional, and there is no in-place
 shortcut.** This paragraph used to offer one in the original ("if a fresh install

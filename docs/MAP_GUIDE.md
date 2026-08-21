@@ -66,6 +66,34 @@ consume it:
 > set and can manufacture a false collision, serialising work that could have run
 > in parallel. Describe comparisons and cross-references *without* paths.
 
+#### Cite where a thing is BUILT, not only where it is declared
+
+A file list derived from where a field is **declared** misses where it is
+**constructed**, and the two fail in opposite ways.
+
+This burned twice in one morning on a live project, in lists written that
+morning. An item added a required field to an API model and cited the schema
+module. The model is assembled field by field by a function in a different file,
+so the field was literally unconstructable inside the declared list. The builder
+correctly CUT THE FEATURE rather than touch a file it was not given — and the
+reduce reported the node as `not-built`, which reads like a failure and is not
+one.
+
+**The check, cheap enough to do every time:** for any item that adds a field to a
+model, or a case to a rule, grep for where that thing is CONSTRUCTED, and cite
+that file too. A reflective constructor silently omits the field; a hand-written
+one will not compile. Neither is visible from the file where it is declared.
+
+#### A companion file does not need a citation
+
+Some files move together by construction and the extractor grants them
+automatically: a `pairedArtifacts` counterpart (change a component, get its test
+in the file list), plus anything in the extractor's `COMPANIONS` table — a
+manifest and its lockfile, a module and the feature-grouped test that covers it.
+
+You do not cite those, and you should not: citing a test file that does not exist
+yet just produces an unresolved-citation warning. Write about the code.
+
 ### `mechanism` — the causal chain
 
 The field that separates a map from a linter. **Why does this actually break, and
@@ -207,6 +235,25 @@ it unfixable, or it reads as laziness and gets re-raised.
 Do **not** leave closed items in the queue with `status: done`. An item that is
 both queued and closed is exactly the ambiguity this removes — and the extractor
 never reads `shipped`, so it cannot be re-dispatched.
+
+> ⚠ **CLOSING AN ITEM IS TWO EDITS, and the second one is the one that gets
+> skipped.** Add the `shipped` entry AND remove the item from the open section.
+> Three items on a live project had complete `shipped` records and were still
+> sitting in `openDebt`, so the extractor put all three back in the queue as
+> `open`. The next batch would have dispatched builders at work already on main
+> — and the likely outcome is not a wasted node but a CONFUSING one: an agent
+> given an item whose fix is already present reports it done without changing
+> anything, which is indistinguishable from a node that silently did nothing.
+> Do the move in one edit, at the end of the batch, before the context is gone.
+
+**A refusal is also a closure, and it belongs in the map as a FIELD.** If you
+decide before dispatch that an item cannot be built yet, do not leave that
+decision in a batch note for a human to re-read — the extractor cannot see prose,
+and it will re-offer the item next batch. Give it `scope: "held"` with a note
+saying who held it and what releases it (the extractor refuses a `held` item with
+no note). Putting the hold in the extractor's `OVERRIDES` table works and is a
+stopgap: that is a code file, and a refusal decided by evidence belongs beside
+the evidence.
 
 Keep the original four fields and add how it closed:
 

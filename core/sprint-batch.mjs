@@ -74,7 +74,26 @@ log(`wave ${WAVE}: ${nodes.length} node(s), ${nodes.reduce((n, x) => n + x.items
 // Structured output is what lets the reduce step below be plain code instead of
 // another model reading prose.
 
-const anchorProps = Object.fromEntries(ANCHOR_IDS.map((id) => [id, { type: 'integer' }]));
+// `['integer','null']`, not `'integer'`. NULL IS "THIS ANCHOR DID NOT APPLY".
+//
+// A conditional anchor (`always: false` + `whenTouches`) has a third state
+// besides pass and fail, and typing it as a bare integer gave that state no
+// representation — so each agent invented one. Watched happen: a node whose diff
+// touched no web file had its builder report the conditional gate as -1 and its
+// verifier, who ran the gate and got a not-applicable exit 0, report 0. Both were
+// correct about reality. The reduce compared the integers and emitted an ANCHOR
+// DISAGREEMENT, which the runbook calls the most important line the system can
+// produce. It only works if it is rare, and this manufactured one on a node where
+// nothing was wrong.
+//
+// Deliberately NOT solved by teaching the reduce to tolerate -1: that would
+// promote one agent's guess to a convention. `null` is the JSON-native absence,
+// both prompts are told to use it, and the reduce skips any comparison where
+// either side is null.
+const anchorProps = Object.fromEntries(ANCHOR_IDS.map((id) => [id, {
+    type: ['integer', 'null'],
+    description: 'exit code observed, or null if this anchor did not apply to this diff',
+}]));
 
 const BUILD_SCHEMA = {
     type: 'object',
@@ -89,6 +108,10 @@ const BUILD_SCHEMA = {
             description: 'files the fix genuinely needed but which were NOT in this node — not edited',
         },
         anchors: { type: 'object', properties: anchorProps },
+        scopeGate: {
+            type: 'integer',
+            description: 'exit code of the scope gate you ran before reporting. 0 = every changed file was declared by this node.',
+        },
         preExistingFailures: { type: 'array', items: { type: 'string' } },
         staleEvidence: {
             type: 'array', items: { type: 'string' },
@@ -129,6 +152,10 @@ const VERDICT_SCHEMA = {
             type: 'object',
             properties: { ...anchorProps, method: { ...SHORT } },
         },
+        observedScopeGate: {
+            type: 'integer',
+            description: 'anchors lens only: exit code of the scope gate you re-ran yourself. Omit if you did not run it.',
+        },
     },
 };
 
@@ -136,12 +163,71 @@ const VERDICT_SCHEMA = {
 
 const slug = (s) => s.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase().slice(0, 48);
 
+// ── anchor placeholders ──────────────────────────────────────────────────────
+//
+// An anchor cmd may carry `{base}`, which resolves to THIS NODE'S BASE — the
+// branch the builder started from, which is not the main branch.
+//
+// The paired-artifact gate is why this exists. It diffs three-dot against a base
+// ref and defaults to project.mainBranch, but preflight.sh's stacking rule means
+// a batch's base is normally the newest UNPUSHED branch, and there can be several
+// batches between pushes. Judged against main, every node inherits every earlier
+// node's gate failures, and it gets worse the deeper the stack.
+//
+// Measured on a live project, 2026-08-19: against main the gate exited 1 on two
+// components already changed on the base branch, and against the node's real base
+// the same tree exited 0. The builder honestly reported 1, its verifier honestly
+// observed 0, and the reduce raised an ANCHOR DISAGREEMENT — the loudest signal
+// this harness produces — over nothing but the base argument. That signal only
+// works if it is rare.
+//
+// The second consequence is the serious one. Once the gate is red from inherited
+// failures, a node that genuinely skipped its own paired artifact is
+// INDISTINGUISHABLE: the anchor was already failing and cannot fail louder. The
+// gate stops discriminating exactly when the stack is deepest, which is when the
+// most work is unreviewed.
+//
+// This does NOT make the gate lenient and must not be turned into that. The
+// inherited failures are real. They are simply not this node's, and an anchor
+// that blames a node for its base teaches builders that this anchor's failures
+// belong to somebody else — the habit scar #17 describes as the thing that
+// destroys a check.
+//
+// The INTEGRATE step asks a DIFFERENT question and keeps its own base: whether
+// the batch AS A WHOLE shipped its paired artifacts. Both callers are right; only
+// the per-node one was passing the wrong base.
+const ANCHOR_PLACEHOLDERS = { base: () => BASE };
+
+// `(?<!\$)` so a shell variable — `${PYTEST_ARGS}` — is left alone. Brace
+// expansion carries a comma and never matches `\w+`.
+const resolveAnchorCmd = (a) => a.cmd.replace(/(?<!\$)\{(\w+)\}/g, (whole, key) => {
+    const resolve = ANCHOR_PLACEHOLDERS[key];
+    if (!resolve) {
+        // THROW RATHER THAN PASS IT THROUGH. An unresolved `{basebranch}` reaches
+        // the gate as a literal ref name and exits 2 — and a 2 in an anchor column
+        // reads as "the check ran and this node is broken", not "the config has a
+        // typo". That is the same masquerade the ITEM_KEYS assertion above exists
+        // to prevent, and the cost of throwing is identical: a launch that fails
+        // in seconds having spent zero tokens, with the offending key named.
+        throw new Error(
+            `sprint-batch: anchor ${JSON.stringify(a.id)} uses unknown placeholder ` +
+            `${whole}. Known: ${Object.keys(ANCHOR_PLACEHOLDERS).map((k) => `{${k}}`).join(', ')}.`,
+        );
+    }
+    return resolve();
+});
+
+// Eager, so a bad placeholder throws before the first agent spawns rather than
+// inside the prompt builder of whichever node happens to render first.
+const ANCHOR_CMDS = new Map(H.anchors.map((a) => [a.id, resolveAnchorCmd(a)]));
+
 const anchorLines = (indent = '    ') => H.anchors.map((a) => {
     const where = a.cwd && a.cwd !== '.' ? `  (from ${a.cwd}/)` : '';
     const cond = a.always === false && a.whenTouches?.length
-        ? `  — ONLY if the diff touches: ${a.whenTouches.join(', ')}`
+        ? `  — ONLY if the diff touches: ${a.whenTouches.join(', ')}. If it does ` +
+          `NOT, report ${a.id}: null — do not invent a number.`
         : '';
-    return `${indent}${a.cmd}${where}${cond}`;
+    return `${indent}${ANCHOR_CMDS.get(a.id)}${where}${cond}`;
 }).join('\n');
 
 const setupLines = () => H.setup.length
@@ -152,6 +238,18 @@ const setupLines = () => H.setup.length
     : '    (none configured)';
 
 const newFilesOf = (node) => new Set(node.items.flatMap((it) => it.newFiles ?? []));
+
+// The scope gate, as a command an agent can run. "Do not touch files outside
+// this node's list" lived as PROSE in three places — the builder contract, the
+// intent lens and the integrate step — and scar #7 is that a rule in a prompt is
+// a suggestion. It is also the only question in the intent lens that is not a
+// judgement call: it is a set difference, and `comm` is both faster and more
+// reliable at that than a language model.
+//
+// An exclusive node is exempt and the script says so itself — a repo-wide node's
+// file list is incomplete by construction, so there is no set to gate against.
+const scopeGateCmd = (node) =>
+    `${H.scopeGate} ${BASE} --files ${JSON.stringify(node.files.join(' '))}`;
 
 // ── the item contract, asserted ──────────────────────────────────────────────
 // EVERY key an item may carry. buildPrompt renders id/severity/source/title/
@@ -223,8 +321,26 @@ function buildPrompt(node) {
         `ANCHORS — run these and report the exit code you ACTUALLY observed:`,
         anchorLines(),
         ``,
+        node.exclusive
+            ? `SCOPE GATE — skipped: this node is exclusive (repo-wide), so its file list is\n` +
+              `incomplete by design. Report scopeGate: 0.`
+            : [
+                `SCOPE GATE — run this AFTER you commit, and report its exit code as \`scopeGate\`:`,
+                ``,
+                `    ${scopeGateCmd(node)}`,
+                ``,
+                `It compares the files you actually changed against the list above. A non-zero`,
+                `exit means you edited something this node does not own. That is not a style`,
+                `problem: the other builders in this wave are running concurrently and are only`,
+                `safe because the partitioner proved your file sets are disjoint.`,
+                ``,
+                `If it fails, REVERT the undeclared files and amend — do not widen the list.`,
+                `A file the fix genuinely needed goes in \`outOfScope\`, unedited.`,
+            ].join('\n'),
+        ``,
         `Then follow your agent instructions: read the evidence, verify it is still`,
-        `accurate, make the smallest correct change, run the anchors, commit.`,
+        `accurate, make the smallest correct change, run the anchors, commit, run the`,
+        `scope gate.`,
         ``,
         `Return the structured object. An independent verifier re-runs these anchors,`,
         `so a false green here will be caught and will invalidate your whole node.`,
@@ -254,6 +370,7 @@ function verifyPrompt(node, build, lens) {
         `  status       : ${build.status}`,
         `  filesChanged : ${(build.filesChanged ?? []).join(', ') || '(none reported)'}`,
         `  anchors      : ${JSON.stringify(build.anchors ?? {})}`,
+        `  scopeGate    : ${build.scopeGate ?? '(not reported)'}`,
         `  summary      : ${build.summary}`,
         ``,
         `Read the diff yourself: \`git diff ${BASE}...${build.branch}\``,
@@ -270,12 +387,29 @@ function verifyPrompt(node, build, lens) {
                 `and the anchors:`,
                 anchorLines(),
                 ``,
+                ``,
+                node.exclusive
+                    ? `This node is exclusive, so the scope gate does not apply. Report observedScopeGate: 0.`
+                    : `and the scope gate, from inside that worktree — report it as \`observedScopeGate\`:\n\n` +
+                      `    ${scopeGateCmd(node)}`,
+                ``,
                 `Clean up: git worktree remove /tmp/verify-${slug(node.nodeId)} --force`,
                 ``,
                 `Report the exit codes you OBSERVED. "It should pass" is not an answer to`,
                 `this lens; only an exit code is.`,
             ].join('\n')
-            : `Judge only through the \`${lens}\` lens as described in your instructions.`,
+            : [
+                `Judge only through the \`${lens}\` lens as described in your instructions.`,
+                ...(lens === 'intent' ? [
+                    ``,
+                    `DO NOT spend this lens checking which files were touched. "Did the diff`,
+                    `change a file outside the list" is a set difference, and a script already`,
+                    `answers it as an exit code on both the builder's side and the anchors lens.`,
+                    `Re-deriving it here is slower, less reliable, and displaces the question`,
+                    `only you can answer: does this change do what the item actually asked for,`,
+                    `and would a user of this code agree it is fixed?`,
+                ] : []),
+            ].join('\n'),
         ``,
         `Return the structured verdict. KEEP EVERY FIELD SHORT: \`evidence\` is a list`,
         `of one-line bullets (max ~300 chars each, no newlines inside a bullet), and`,
@@ -321,6 +455,25 @@ const results = await pipeline(
 );
 
 // ── REDUCE — plain code, no model, no tokens ─────────────────────────────────
+//
+// Everything between the two markers below is a PURE FUNCTION of what came back.
+// No agents, no clock, no filesystem, no globals — the same inputs always give
+// the same report.
+//
+// It is fenced off like this because it could not be tested. Workflow scripts
+// cannot be imported (no module loader, no filesystem), so for as long as the
+// reduce lived inline among the agent calls, selftest.sh could only PARSE this
+// file. That left the outcome classification, the fan-in guard and the anchor
+// disagreement check — the three things the whole system's honesty rests on —
+// as the only load-bearing code in the kit with no test behind it.
+//
+// selftest.sh now slices the text between these markers out of THIS file and
+// evaluates it against fixture results, so the test exercises the shipped code
+// rather than a copy of it. If you move or rename the markers, update
+// `reduce fixtures` in selftest.sh — it fails loudly if it cannot find them.
+//
+// ──REDUCE-BEGIN── (sliced by selftest.sh — do not delete this marker)
+function reduceWave({ nodes, results, lenses, anchorIds, requiredAnchorIds, requireAllLenses }) {
 
 const dispatched = nodes.length;
 const returned = results.filter(Boolean);
@@ -334,20 +487,41 @@ const report = returned.map((r) => {
     // A node is accepted only when every lens ran AND none rejected.
     // Majority is NOT enough: the lenses ask different questions, so a single
     // reject is a real finding, not an outvoted opinion.
-    const allLensesRan = !H.requireAllLenses || verdicts.length === LENSES.length;
-    const accepted = r.build?.status === 'done' && allLensesRan && rejects.length === 0;
+    const allLensesRan = !requireAllLenses || verdicts.length === lenses.length;
+
+    // A scope violation is not a lens opinion, it is an exit code, and it means
+    // the builder edited a file another node in this wave may own. Accepting it
+    // would void the partitioner's disjointness proof for the whole wave, so it
+    // fails the node on its own — a green anchor set on a branch that reached
+    // outside its node is a green build of the wrong tree.
+    //
+    // `null`/undefined is NOT treated as 0. A builder that did not report the
+    // gate has not passed it, and defaulting a missing number to success is the
+    // exact shape of scar #8: a guard that fails open is the same as no guard.
+    const observedGate = verdicts.find((v) => v.observedScopeGate != null)?.observedScopeGate;
+    const scopeGate = observedGate ?? r.build?.scopeGate ?? null;
+    const scopeClean = scopeGate === 0;
+
+    const accepted = r.build?.status === 'done' && allLensesRan
+        && rejects.length === 0 && scopeClean;
 
     // "Rejected" and "unverified" are DIFFERENT outcomes and must never be
     // collapsed. A node whose verifier crashed has not been judged; reporting it
     // as rejected invents a finding nobody made. The first real run of the
     // original system produced exactly that — five nodes listed as rejected when
     // zero verifiers rejected anything and every lost verdict was a pass.
+    //
+    // A REPORTED non-zero gate is a finding — somebody ran the check and it
+    // failed, so the node is rejected. An UNREPORTED gate is not a finding, it
+    // is a question nobody answered, and that is `unverified`. Same distinction
+    // as a missing lens, for the same reason.
     const outcome = accepted ? 'accepted'
         : rejects.length > 0 ? 'rejected'
         : r.build?.status !== 'done' ? 'not-built'
+        : scopeGate != null && scopeGate !== 0 ? 'rejected'
         : 'unverified';
 
-    const missingLenses = LENSES.filter((l) => !verdicts.some((v) => v.lens === l));
+    const missingLenses = lenses.filter((l) => !verdicts.some((v) => v.lens === l));
 
     return {
         nodeId: r.node.nodeId,
@@ -363,6 +537,9 @@ const report = returned.map((r) => {
         passes: passes.map((v) => v.lens),
         observedAnchors: verdicts.find((v) => v.lens === 'anchors')?.observedAnchors ?? null,
         claimedAnchors: r.build?.anchors ?? null,
+        scopeGate,
+        claimedScopeGate: r.build?.scopeGate ?? null,
+        observedScopeGate: observedGate ?? null,
         outOfScope: r.build?.outOfScope ?? [],
         preExistingFailures: r.build?.preExistingFailures ?? [],
         staleEvidence: r.build?.staleEvidence ?? [],
@@ -381,18 +558,44 @@ if (lost > 0) {
         `DO NOT treat this batch as complete.`);
 }
 for (const r of report) {
-    if (r.outcome === 'unverified') {
+    // Only when lenses are actually missing. A node can now be `unverified`
+    // because nobody reported the scope gate even though all three lenses ran,
+    // and printing "missing []" at the operator sends them looking for a dead
+    // verifier that never existed. The scope-gate warning below names that case.
+    if (r.outcome === 'unverified' && r.missingLenses.length) {
         warnings.push(
-            `${r.nodeId}: UNVERIFIED, not rejected — ${r.verdictsRun}/${LENSES.length} verifiers returned, ` +
+            `${r.nodeId}: UNVERIFIED, not rejected — ${r.verdictsRun}/${lenses.length} verifiers returned, ` +
             `missing [${r.missingLenses.join(', ')}]. No verifier rejected this node; it simply was not judged ` +
             `on those lenses. Re-run verification before treating it either way.`);
+    }
+    if (r.scopeGate != null && r.scopeGate !== 0) {
+        warnings.push(
+            `${r.nodeId}: SCOPE VIOLATION — the scope gate exited ${r.scopeGate}. This branch ` +
+            `changed a file the node does not own, so the partitioner's disjointness proof no ` +
+            `longer holds for this wave. Do not merge it: re-read the diff and re-partition.`);
+    }
+    if (r.scopeGate == null && r.builderStatus === 'done') {
+        warnings.push(
+            `${r.nodeId}: the scope gate was never reported by the builder OR the anchors lens. ` +
+            `Nobody checked whether this branch stayed inside its file list — that is unverified, ` +
+            `not clean.`);
+    }
+    if (r.claimedScopeGate != null && r.observedScopeGate != null
+        && r.claimedScopeGate !== r.observedScopeGate) {
+        warnings.push(
+            `${r.nodeId}: SCOPE GATE DISAGREEMENT — builder claimed ${r.claimedScopeGate}, ` +
+            `verifier observed ${r.observedScopeGate}.`);
     }
     // The builder's claimed exit codes vs what a fresh agent actually observed.
     // A disagreement here is the single most important line this system can
     // produce: it means one of the two is reporting a build that does not exist.
     const claimed = r.claimedAnchors, observed = r.observedAnchors;
     if (claimed && observed) {
-        for (const k of ANCHOR_IDS) {
+        for (const k of anchorIds) {
+            // `null` on either side means "did not apply to this diff", which is
+            // agreement about a third state, not a mismatch. Comparing it would
+            // manufacture the loudest warning this system has on a node where
+            // nothing is wrong.
             if (observed[k] != null && claimed[k] != null && observed[k] !== claimed[k]) {
                 warnings.push(
                     `${r.nodeId}: ANCHOR DISAGREEMENT on ${k} — ` +
@@ -400,13 +603,21 @@ for (const r of report) {
             }
         }
     }
+    // ...but `null` is only a legitimate answer for a CONDITIONAL anchor. An
+    // always-run anchor reported as null is a required check nobody ran, and
+    // treating absence as success is scar #8 with a different name.
+    for (const k of requiredAnchorIds ?? []) {
+        if (r.builderStatus !== 'done') continue;
+        if (claimed?.[k] === undefined || claimed?.[k] === null) {
+            warnings.push(
+                `${r.nodeId}: anchor ${k} runs on every diff and the builder reported no exit ` +
+                `code for it. null means "did not apply", and this one always applies — so this ` +
+                `is a required check nobody ran, not a check that passed.`);
+        }
+    }
 }
 
-log(`wave ${WAVE} done: ${report.filter((r) => r.accepted).length}/${dispatched} accepted, ${warnings.length} warning(s)`);
-
 return {
-    batch: BATCH,
-    wave: WAVE,
     dispatched,
     returned: returned.length,
     accepted: report.filter((r) => r.outcome === 'accepted').map((r) => r.nodeId),
@@ -416,3 +627,19 @@ return {
     warnings,
     nodes: report,
 };
+
+}
+// ──REDUCE-END── (sliced by selftest.sh — do not delete this marker)
+
+const reduced = reduceWave({
+    nodes,
+    results,
+    lenses: LENSES,
+    anchorIds: ANCHOR_IDS,
+    requiredAnchorIds: H.anchors.filter((a) => a.always !== false).map((a) => a.id),
+    requireAllLenses: H.requireAllLenses,
+});
+
+log(`wave ${WAVE} done: ${reduced.accepted.length}/${reduced.dispatched} accepted, ${reduced.warnings.length} warning(s)`);
+
+return { batch: BATCH, wave: WAVE, ...reduced };

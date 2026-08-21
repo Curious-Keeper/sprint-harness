@@ -647,3 +647,461 @@ regression.
 **Where it lives.** The `DO NOT ADD A CARVE-OUT` block and `DEFAULT_REASON` in
 `core/deny-push.sh`, and the stash cases in the `── push guard ──` block of
 `selftest.sh`.
+
+---
+
+## 20. An exclusive node left in the graph is a bridge
+
+**What happened.** `plan-batch.mjs` unioned every selected item — including
+`scope: "repo-wide"` ones — and only skipped them later, when emitting groups.
+The comment above the wave logic already said exclusivity "BYPASSES the
+union-find". It did not. The item stayed in the graph as an ordinary vertex.
+
+Reproduced with three items: `P1{p1,x}`, `P2{p2,y}`, and repo-wide `H{x,y}`. P1
+and P2 share nothing. Each shares one file with H. Union-find joined all three,
+and P1+P2 came out as one serial node.
+
+**Why it mattered more than lost width.** `node.files` is the union of a group's
+members and becomes the builder's *"files this node owns — do not edit anything
+else"* list. So the bridge did not merely serialise two builders that did not
+collide; it handed each of them the *other item's* files, plus the repo-wide
+item's, as files they were authorised to edit. The exclusive node then claimed
+the same files again a wave later.
+
+**How it hid.** `groupReason()` ended with `.join("; ") || "grouped"`. No shared
+file, no ref edge and no lane could explain the grouping, so the plan printed the
+bare word `grouped` — which reads exactly like a decision somebody made.
+
+**The fix.** An exclusive item forms no edges at all: not file edges, not ref
+edges, not lane edges. Sequencing into its own wave is the entire guarantee. And
+`groupReason()` now **throws** instead of falling back to a word: every edge the
+partitioner can draw is one of three nameable kinds, so a group it cannot explain
+is a group joined by an edge nobody intended.
+
+**Blast radius.** `--auto` only selects `scope: "bounded"` items, so this could
+never fire on an auto batch. It fired when an operator named ids explicitly —
+which is the documented path for any batch containing a repo-wide item.
+
+**Where it lives.** `isExclusive` and the three edge loops in `core/plan-batch.mjs`;
+the `── exclusive bridge ──` block in `selftest.sh`.
+
+**The general shape.** A guarantee stated in a comment is not implemented by the
+comment. This one had been described correctly in a published write-up, in the
+file header, and in the wave-logic comment — three places agreeing about
+behaviour the code never had.
+
+---
+
+## 21. A one-node "diamond" is the original loop with a 4x tax
+
+**What happened.** `docs` and the skill template both carried a *"When NOT to use
+this"* section: if you cannot find two items with no edge between them, there is
+no graph, and the work belongs in the main loop. Nothing enforced it.
+`plan-batch.mjs P1` printed `fan-out width 1` and exited 0, and the resulting run
+was reported afterwards in the same shape as a real batch.
+
+Fan-out width 1 is not a cheaper loop. It is the same loop plus a builder
+handoff, N verifiers and a reduce step — roughly 4x the tokens for zero
+parallelism — and it reads as a graph in the report.
+
+**The fix.** The partitioner computes advisories and prints them under `NOT A
+GRAPH`. Two signals, deliberately different in force:
+
+- `--auto` **refuses** (exit 1) to propose a width-1 batch. Auto mode is the
+  machine proposing, and it must not propose a non-graph.
+- Explicit ids **warn** and proceed. Re-running one rejected node through the
+  verify lenses is a legitimate workflow, and refusing it to enforce a style rule
+  would break real work.
+
+A node holding many items is flagged separately: that is the density trap working
+as designed, but one builder doing eight items serially in one context has no
+fan-out inside it, and the operator should choose that knowingly.
+
+**Where it lives.** The `── is this even a graph? ──` block in `core/plan-batch.mjs`;
+the `── not a graph ──` block in `selftest.sh`.
+
+---
+
+## 22. The code that decides what a batch MEANS had no test
+
+**What happened.** The reduce step — outcome classification, the fan-in guard,
+the claimed-vs-observed anchor comparison — is the part of the system that turns
+agent output into a verdict. Scars #2 and #14 are both about it. It was also the
+only load-bearing code in the kit with no test behind it. `selftest.sh` said so
+in its own header: *"The workflow graph needs a live agent runtime and is NOT
+covered here — it is syntax-checked only."*
+
+The blocker was real: a Workflow script has no module loader and no filesystem,
+so it cannot be imported.
+
+**The fix.** Fence the reduce between two markers, make it a pure function of
+`(nodes, results, lenses, anchorIds, requireAllLenses)`, and have
+`core/reduce-fixture.mjs` slice the text out of the shipped file and evaluate it.
+The test runs the real code, not a copy, at zero agents and zero tokens.
+
+Then mutate it, because a test that cannot fail proves nothing. `selftest.sh`
+patches the shipped reduce four ways — collapsing `unverified` into `rejected`,
+disabling the anchor comparison, downgrading a single reject to a majority vote,
+removing the fan-in guard — and asserts the fixture catches each. The mutation
+helper also asserts the patch *applied*: a `sed` that silently matched nothing
+would otherwise look identical to a fixture that missed.
+
+**What this does NOT prove, and it matters.** It shows the reduce classifies bad
+input correctly. It does **not** show the lenses detect anything. A verifier that
+rubber-stamps everything emits `pass` verdicts that this fixture would happily
+classify as `accepted`. The portable kit's headline result — 10 of 10 nodes
+accepted first pass, zero rejects — is consistent with three working lenses and
+equally consistent with three that are not looking. **A live canary node, with a
+deliberately wrong change in it, has not yet been run through this kit.** Until
+one produces a reject, the verify half of the diamond is an architecture diagram.
+
+**Where it lives.** The `──REDUCE-BEGIN──`/`──REDUCE-END──` markers in
+`core/sprint-batch.mjs`, `core/reduce-fixture.mjs`, and the `── reduce ──` block
+in `selftest.sh`.
+
+---
+
+## 23. Three prompts asked for one set difference
+
+**What happened.** *"Do not touch files outside this node's list"* was written
+three times, in three places, in prose: the builder contract, the `intent` lens,
+and the integrate step. Scar #7 already says a rule in a prompt is a suggestion.
+
+It is also the one question in the `intent` lens that is not a judgement call. It
+is a set difference between the paths a branch changed and the paths a node
+declared — and paying a language model to re-derive it is slower and less
+reliable than `comm`.
+
+**The fix.** `core/scope-gate.sh`, in the `paired-artifact-gate.sh` family. The
+builder runs it after committing and reports `scopeGate`; the `anchors` lens
+re-runs it and reports `observedScopeGate`; `integrate.sh` runs it against the
+merged tree with `--wave`. The reduce compares the two numbers exactly as it
+compares anchors, and the `intent` prompt now says explicitly **not** to spend
+the lens on file sets.
+
+Two details that are not optional:
+
+- **An exclusive node is exempt, loudly.** A repo-wide node's file list is
+  incomplete by construction, so gating it against that list would reject every
+  repo-wide node on sight. The script prints `EXEMPT` and why, rather than
+  passing silently.
+- **A missing gate is not a passing gate.** `scopeGate ?? 0` would be scar #8 all
+  over again. An unreported gate makes the node `unverified`, never `accepted`.
+
+**Where it lives.** `core/scope-gate.sh`, the `scopeGate` handling in the reduce,
+and the `── scope gate ──` block in `selftest.sh`.
+
+---
+
+## 24. `{{INTEGRATE}}` was a placeholder where the merge should have been
+
+**What happened.** The skill template ended the pipeline with three sentences and
+a `{{INTEGRATE}}` comment: *"Merge accepted branches in wave order, then re-run
+the anchors on the merged tree — per-node green does not imply merged green."*
+The step between "every node passed" and "the thing they add up to passes" was a
+human running git from memory.
+
+Four ways that goes wrong, all silent: merging an `unverified` node because the
+report is long and it does not look like a rejection; merging wave 1 before wave
+0, which is the only reason waves exist; hand-resolving a conflict, producing
+code no builder wrote and no verifier will ever see; and declaring victory on
+per-node green without ever running the anchors on the merged result.
+
+**The fix.** `core/integrate.sh`. Merges only `accepted`, in wave order, refuses a
+report carrying any warning, aborts a conflict instead of resolving it, and runs
+the scope gate and the anchors on the merged tree after each wave.
+
+**The bug found while testing it.** The merges land *on* `$BASE`, so after wave 0
+the ref no longer points where the batch started. `git diff $BASE...HEAD` then
+compares the merged tree against itself, returns nothing, and the scope gate
+reports "nothing to check" and exits 0. The happy path printed a green scope line
+for a merge it had never examined — a gate that passed because it was asked the
+wrong question, indistinguishable in the output from one that passed because the
+tree was clean. Fixed by pinning `BASE_SHA` before any merge. The selftest asserts
+it by staging an undeclared path in a merged branch, and that case fails if the
+pin is reverted.
+
+**Where it lives.** `core/integrate.sh`, and the `── integrate ──` block in
+`selftest.sh`.
+
+---
+
+## 25. The file-extension list IS the partitioner
+
+**What happened.** Union-find is the easy half, and it is correct given its
+edges. The edges come from a regex scraping file paths out of map prose, so the
+extension list in that regex decides what the collision graph can see. The
+default list covers application source: `ts`, `go`, `py`, `sql` and friends. It
+does not include `md`, `mdx`, `svg`, `png`, `astro` or `vue`.
+
+The header comment said so — *"a path whose extension is missing here is a file
+the collision graph cannot see"* — and left it as a note to the reader, in a file
+the kit tells you never to edit.
+
+**The case that actually bites is PARTIAL visibility, not zero.** An item with no
+scrapeable path scores `unscoped` and gets refused; that failure is loud. An item
+touching `docs/guide.md` **and** `src/nav.ts` scrapes the `.ts`, scores
+`bounded`, and ships inside a node the planner is confident about — with an
+invisible `.md` collision in it.
+
+**The fix, in two halves.**
+
+- The list moves to `extract.fileExtensions` in `harness.config.json`, so a
+  content site declares `md`/`mdx`/`svg` without editing `core/`.
+- The regex becomes a **linter about itself**. A second pass matches any
+  path-shaped token with any extension; anything that resolves to a file tracked
+  in git but whose extension is not configured is printed under `INVISIBLE FILE
+  TYPES`, naming the extension and the config key to add. The scraper suggests,
+  and reports its own blind spots. It does not silently decide what collides.
+
+The noise floor is deliberate — `.com`, `.io`, `.js` in "Node.js", version
+numbers and `i.e.` are excluded, and an unresolvable path is not reported at all.
+A linter that cries wolf is one people stop reading (scar #17).
+
+**Still open.** The stronger version of this — `files`/`newFiles` as a required,
+hand-pinned field on every dispatchable item, with citations demoted to
+*evidence* that the pin is true — is the right end state and is not built. Today
+the scraped set is still what the graph is made of; it just no longer hides what
+it could not see.
+
+**Where it lives.** `DEFAULT_EXTENSIONS`, `fileRe()` and the `ANY_PATH_RE` pass in
+`core/lib/extract.mjs`; validation in `core/lib/config.mjs`; the `── file
+extensions ──` block in `selftest.sh`.
+
+---
+
+## 26. `\b` cannot match before a leading dot, so `.github/` was invisible
+
+**What happened.** `FILE_RE` opened with `\b`. That is a boundary between a word
+character and a non-word character, and a path beginning with a dot-directory —
+`.github/workflows/ci.yml` — has no word character before the dot. So the regex
+could not start there. It started one character later and captured
+`github/workflows/ci.yml`.
+
+Which then resolves to nothing. Suffix matching looks for a tracked path ending
+in `/github/workflows/ci.yml`; the real file ends in `/.github/...`.
+
+**Every citation of a dot-directory was silently dropped from the collision
+graph.** `.github/`, `.claude/`, `.circleci/`, `.config/` — and CI workflow files
+are exactly the kind of file several unrelated items touch at once.
+
+**How it was found.** Not by the kit. A project running the harness for a week
+had accumulated a per-repo alias table to work around it:
+
+```js
+"github/workflows/ci.yml": ".github/workflows/ci.yml",
+"claude/work/extract-queue.mjs": ".claude/work/extract-queue.mjs",
+```
+
+with a comment reading *"FILE_RE's leading `\b` eats the dot on a dot-directory"*.
+The workaround was correct, was written three times, and was per-repo boilerplate
+for a core defect. One of those aliases was load-bearing for seven items.
+
+**The fix.** Replace the leading `\b` with `(?<![\w./-])` — "not already inside a
+path". It admits the leading dot, and it still prevents matching at offset 1 of a
+path already matched at offset 0.
+
+**The general shape.** This is scar #25's partial-visibility failure reached by a
+different route: the item usually cites other files too, so it still scores
+`bounded` and the plan still looks confident. A workaround in a downstream repo
+is evidence about the upstream tool, and it is only evidence if somebody reads
+it.
+
+**Where it lives.** `LEFT_EDGE` in `core/lib/extract.mjs`, and the dot-directory
+cases in the `── file extensions ──` block of `selftest.sh`.
+
+---
+
+## 27. An anchor that diffs against a ref must be told WHICH ref
+
+**What happened.** The paired-artifact gate takes a base ref and defaults to
+`project.mainBranch`. But the stacking rule means a batch's base is normally the
+newest UNPUSHED branch, and there can be several batches between pushes.
+
+Judged against main, every node inherits every earlier node's gate failures, and
+it gets worse the deeper the stack.
+
+**Measured, 2026-08-19.** Against main the gate exited 1 on two components that
+had been changed by an earlier commit already on the base branch. Against the
+node's real base, the same tree exited 0. The builder honestly reported 1, its
+verifier honestly observed 0, and the reduce raised an **ANCHOR DISAGREEMENT** —
+the loudest signal this harness produces — over nothing but the base argument.
+That signal only works if it is rare.
+
+**The second consequence is the serious one.** Once the gate is red from
+inherited failures, a node that genuinely skipped its own paired artifact is
+INDISTINGUISHABLE: the anchor was already failing and cannot fail louder. The
+gate stops discriminating exactly when the stack is deepest, which is when the
+most work is unreviewed. That is scar #17 arriving by a different route — a check
+that is red for everyone is one people stop reading.
+
+**The fix.** An anchor `cmd` may carry `{base}`, resolved to the node's base
+before any agent spawns. An unknown placeholder **throws**: an unresolved
+`{basebranch}` would reach the shell as a literal ref name and exit 2, and a 2 in
+an anchor column reads as "the check ran and this node is broken", not "the
+config has a typo". Shell variables (`${VAR}`) are deliberately left alone.
+
+**This does not make the gate lenient and must not become that.** The inherited
+failures are real missing artifacts. They are simply not this node's, and an
+anchor that blames a node for its base teaches builders that this anchor's
+failures belong to somebody else. The INTEGRATE step asks a different question
+and keeps its own base: whether the batch AS A WHOLE shipped its artifacts.
+
+**Where it lives.** `ANCHOR_PLACEHOLDERS` and `resolveAnchorCmd` in
+`core/sprint-batch.mjs`; the `── anchor placeholders ──` block in `selftest.sh`.
+
+---
+
+## 28. A conditional anchor had no way to say "did not apply"
+
+**What happened.** `BUILD_SCHEMA` typed every anchor as a bare integer. An anchor
+configured `always: false` with `whenTouches` has a THIRD state besides pass and
+fail, and that state had no representation — so each agent invented one.
+
+A node whose diff touched only `docker-compose.yml` had its builder report the
+conditional web gate as `-1`. Its verifier ran the gate, got a not-applicable
+exit 0, and reported `0`. **Both were correct about reality.** The reduce compared
+the integers and emitted an ANCHOR DISAGREEMENT on a node where nothing was
+wrong.
+
+**Two scars colliding.** The runbook calls the anchor disagreement the most
+important line the system can produce, and it only works if it is rare (#14, #17).
+This was the second independent cause of the identical false alarm, and it
+surfaced on the first batch to run the fix for the first cause (#27).
+
+**The fix.** `type: ['integer', 'null']`. `null` is the JSON-native absence, both
+prompts are told to use it, the conditional anchor's rendered line says so
+explicitly, and the reduce skips any comparison where either side is null.
+
+**Deliberately NOT fixed by teaching the reduce to tolerate `-1`.** That would
+promote one agent's guess to a convention.
+
+**And null had to be made unsafe elsewhere in the same change.** `null` is only
+legitimate for a CONDITIONAL anchor. An `always: true` anchor reported as null is
+a required check nobody ran, and treating absence as success is scar #8 with a
+different name — so the reduce warns on it.
+
+**Where it lives.** `anchorProps` and the `requiredAnchorIds` loop in
+`core/sprint-batch.mjs`; four reduce-fixture cases and two mutation checks in
+`selftest.sh`.
+
+---
+
+## 29. The harness compelled a file that no file list granted
+
+**What happened.** `pairedArtifacts` COMPELS a counterpart: change a component,
+ship its test, or the gate exits non-zero. But `files` is scraped from citations,
+and a map entry cites the code it is about — not the test that does not exist
+yet.
+
+So a builder handed a component and not its test had exactly two
+moves: fail its own anchor, or edit outside its node. It left scope, wrote the
+test, and the `intent` lens rejected the node for it.
+
+**Every party behaved correctly and the node was still lost.** The builder obeyed
+the gate. The lens obeyed the scope rule. The rule they were both obeying was
+self-contradictory.
+
+**Three appearances of one hole**, all found in a single week on one project:
+a manifest that could not move without its lockfile, a test directory no item
+could cite, and a generated schema (see #30).
+
+**The fix.** The counterpart is DERIVED from the same `pairedArtifacts` rule the
+gate enforces, and added to whatever the scraper already found. Not restated —
+derived — so the two cannot drift.
+
+**Why this is not an `OVERRIDES` entry, and why that distinction is load-bearing.**
+An OVERRIDES entry names an ITEM and asserts a human decision about that item's
+scope; it has to be rationed, because it can smuggle scope onto work the map
+cannot describe. A companion names a FILE RELATIONSHIP that holds for every item,
+forever, and is applied only to files the scraper already found — so an item that
+cited nothing still gets nothing.
+
+It makes the graph MORE correct rather than more permissive: two items editing
+one component already collided, and now they also collide on the single test file
+they would both have rewritten.
+
+**The general lesson, and it took three instances to see it: A SCOPE REJECT IS
+NOT AUTOMATICALLY A BUILDER ERROR.** Read which of the builder, the lens, or the
+LIST is wrong before re-dispatching. Twice the list was wrong, and re-running the
+builder against the same wrong list just reproduces the reject.
+
+**Where it lives.** `pairedArtifactFor` and `withCompanions` in
+`core/lib/extract.mjs`, the `COMPANIONS` table in `templates/extract-queue.mjs`,
+and the `── companions ──` block in `selftest.sh`.
+
+---
+
+## 30. A generated file is nobody's file
+
+**What happened.** A builder rewrote a route's docstring. The framework publishes
+docstrings as the OpenAPI `description`, and the committed `openapi.json` was in
+no node's file list — so nothing regenerated it, and the committed schema stopped
+matching the app.
+
+**Every anchor was green.** On the node, and on the merged tree, because no anchor
+regenerates it. CI does, and CI was the first thing to notice — after the merge,
+on the pushed PR.
+
+**A `pairedArtifacts` rule is the WRONG fix here**, and this is the interesting
+part. Most edits to a source do not move the generated file, so a rule demanding
+`openapi.json` on every one would be noise that gets waived by habit — and a
+waiver applied by habit is worse than no rule, because it looks like a decision.
+
+**The fix belongs where the whole batch exists in one tree: the integrate step.**
+`regenerate` in config, run by `integrate.sh` after merging a wave and before the
+merged-tree anchors, with the resulting diff committed alongside the merge.
+
+**Ordering is part of the fix.** Regeneration runs AFTER the scope gate, because
+the scope gate judges what the BUILDERS changed. Run it first and every batch
+with a generated artifact reports a scope violation for a file the integrate
+script wrote itself.
+
+**Where it lives.** `regenerate` in `core/lib/config.mjs` and the schema, the
+regeneration block in `core/integrate.sh`, and two cases in the `── integrate ──`
+block of `selftest.sh`.
+
+---
+
+## 31. Lessons that are not code yet
+
+Recorded because a lesson unrecorded is a lesson learned repeatedly, and because
+each of these is a hole somebody will otherwise re-derive at their own cost.
+
+**A refusal decided by evidence belongs in the MAP, as a field.** An item was
+refused before dispatch, with the reason written into a batch record — and the
+extractor, which walks the open-work sections and has never read that record,
+put it straight back in the queue. Its builder spent a full context re-deriving
+the same conclusion and returned blocked. Third instance of the shape in one
+week. Putting the hold in the extractor's `OVERRIDES` table works and is a
+stopgap: OVERRIDES is a code file, and a refusal decided by evidence belongs
+beside the evidence. The fix is a declared field the extractor maps to
+`scope: "held"` — not prose it has to parse, because making an English sentence
+load-bearing is the thing this whole design avoids.
+
+**A file list derived from where a field is DECLARED misses where it is BUILT.**
+Twice in one morning, in lists written that morning. A schema module was named;
+the model is constructed field by field somewhere else, so a required field was
+literally unconstructable inside the declared list. One instance was caught by
+reading the partition before dispatch and cost one map edit. The other was not,
+and the builder correctly CUT THE FEATURE rather than touch an undeclared file —
+and the reduce reported that node as `not-built`, which reads like a failure and
+is not one. **The check, cheap enough to do every time: for any item adding a
+field to a model, grep for where that model is CONSTRUCTED, not only where it is
+declared.**
+
+**Closing an item is two edits, and only one of them gets made.** Three items had
+complete closure records AND were still sitting in the open-work section, so the
+extractor put all three back in the queue as open. The next batch would have
+dispatched builders at work already on main — and the likely outcome is not a
+wasted node but a CONFUSING one: an agent given an item whose fix is already
+present reports it done without changing anything, which is indistinguishable
+from a node that silently did nothing. The extractor is the one place that reads
+both sections and could refuse to write. Until it does, integrate checks by hand.
+
+**A rejected node may still be right, and neither of ours was re-judged.** Twice a
+node was rejected on scope by one lens while the other two passed, and both times
+the FILE LIST was what was wrong. Correcting a list and merging on the standing
+verdicts is not the same as a fresh lens judging the corrected node. What is
+trusted in those cases is anchors and a watched failure, not a second opinion.
+Stated here rather than left to be inferred.

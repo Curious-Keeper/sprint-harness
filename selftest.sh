@@ -131,6 +131,163 @@ grep -q '\["test"\]' <<< "$out" \
     && ok "workflowSlice carries anchors to the graph" \
     || no "workflowSlice carries anchors to the graph"
 
+# THE SCHEMA AND THE LOADER CAN DRIFT, and the kit says so as a known gap:
+# validate() is hand-written and nothing checked it against the JSON schema. This
+# does not do full validation (no ajv dependency), but it catches the class that
+# actually bit — a shipped example carrying a key the schema forbids, which makes
+# the example fail the validation the schema advertises.
+schema_out=$(node -e '
+const s = require("'"$HERE"'/harness.config.schema.json");
+const fs = require("fs"), path = require("path");
+const allowed = new Set(Object.keys(s.properties));
+const bad = [];
+for (const f of fs.readdirSync("'"$HERE"'/examples")) {
+    if (!f.endsWith(".json")) continue;
+    const c = JSON.parse(fs.readFileSync(path.join("'"$HERE"'/examples", f), "utf8"));
+    for (const k of Object.keys(c)) if (!allowed.has(k)) bad.push(`${f}:${k}`);
+}
+console.log(bad.join(",") || "clean");' 2>&1)
+[ "$schema_out" = "clean" ] \
+    && ok "every shipped example uses only keys the schema allows" \
+    || no "every shipped example uses only keys the schema allows ($schema_out)"
+
+# Every top-level key the LOADER defaults must exist in the schema, or a
+# documented setting is one the schema rejects.
+drift_out=$(node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const schema = JSON.parse(readFileSync("'"$HERE"'/harness.config.schema.json", "utf8"));
+const src = readFileSync("'"$HERE"'/core/lib/config.mjs", "utf8");
+const block = src.slice(src.indexOf("const DEFAULTS = {"), src.indexOf("\nconst merge ="));
+const keys = [...block.matchAll(/^    ([a-zA-Z]+):/gm)].map((m) => m[1]);
+const missing = keys.filter((k) => !(k in schema.properties));
+console.log(missing.join(",") || "clean");' 2>&1)
+[ "$drift_out" = "clean" ] \
+    && ok "every config key the loader defaults is in the schema" \
+    || no "every config key the loader defaults is in the schema (missing: $drift_out)"
+
+# ── file extensions are the partitioner ──────────────────────────────────────
+#
+# Union-find is correct given its edges; the edges come from scraping prose. An
+# extension the scraper cannot see is a file the collision graph cannot see, and
+# the dangerous case is PARTIAL visibility — an item touching a .md and a .ts
+# scrapes the .ts, scores `bounded`, and hides the .md collision in a node the
+# planner is confident about.
+echo
+echo "── file extensions ──"
+ext_out=$(node --input-type=module -e '
+import { citedFiles, buildResolver, DEFAULT_EXTENSIONS, fileRe }
+    from "'"$REPO"'/.claude/harness-core/lib/extract.mjs";
+const tracked = ["src/nav.ts", "docs/guide.md", "src/App.vue"];
+const r = buildResolver(tracked);
+const prose = "Update src/nav.ts and the copy in docs/guide.md";
+const a = citedFiles(prose, r);
+const b = citedFiles(prose, r, { extensions: [...DEFAULT_EXTENSIONS, "md"] });
+const noise = citedFiles("See example.com, i.e. the one at foo.unknown", r);
+console.log(JSON.stringify({
+    defaultFiles: a.files,
+    flagged: a.problems.filter(p => p.unknownExtension).map(p => p.resolved),
+    configuredFiles: b.files,
+    configuredProblems: b.problems.length,
+    noiseProblems: noise.problems.filter(p => p.unknownExtension).length,
+    tsxWins: [..."edit web/A.tsx now".matchAll(fileRe())].map(m => m[1]),
+}));' 2>&1)
+
+xcheck() { # <desc> <jq-filter> <expected>
+    local got; got=$(jq -r "$2" <<< "$ext_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"
+}
+xcheck "an unconfigured extension is NOT scraped into the graph" \
+    '.defaultFiles|join(",")' "src/nav.ts"
+xcheck "...but it is REPORTED rather than silently dropped" \
+    '.flagged|join(",")' "docs/guide.md"
+xcheck "configuring the extension puts the file in the graph" \
+    '.configuredFiles|join(",")' "docs/guide.md,src/nav.ts"
+xcheck "a configured extension produces no complaint" '.configuredProblems' 0
+# A linter that cries wolf is one people stop reading — scar #17.
+xcheck "prose that is not a file does not cry wolf" '.noiseProblems' 0
+# The alternation must be longest-first or `ts` eats the `tsx`.
+xcheck "tsx does not lose the race against ts" '.tsxWins|join(",")' "web/A.tsx"
+
+# DOT-DIRECTORIES. `\b` cannot match before a leading dot, so the old regex
+# started one character late and captured `github/workflows/ci.yml` — which
+# suffix-matches nothing, because the real path ends in `/.github/...`. Every
+# citation of .github/, .claude/ or .circleci/ was silently dropped from the
+# collision graph. Found in a live project 2026-08-21, which had been working
+# around it with a per-repo alias table.
+dot_out=$(node --input-type=module -e '
+import { citedFiles, buildResolver, fileRe }
+    from "'"$REPO"'/.claude/harness-core/lib/extract.mjs";
+const tracked = [".github/workflows/ci.yml", ".claude/work/extract-queue.mjs", "src/a.ts"];
+const r = buildResolver(tracked);
+console.log(JSON.stringify({
+    scraped: [...".github/workflows/ci.yml and .claude/work/extract-queue.mjs".matchAll(fileRe())].map(m => m[1]),
+    resolved: citedFiles("bump .github/workflows/ci.yml:60-61 and src/a.ts", r).files,
+    midSentence: [..."see `.circleci/config.yml` here".matchAll(fileRe())].map(m => m[1]),
+    noDoubleMatch: [...".github/workflows/ci.yml".matchAll(fileRe())].length,
+}));' 2>&1)
+dcheck() { local got; got=$(jq -r "$2" <<< "$dot_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+dcheck "a leading dot-directory keeps its dot" \
+    '.scraped|join(",")' ".github/workflows/ci.yml,.claude/work/extract-queue.mjs"
+dcheck "...and therefore RESOLVES to the tracked file" \
+    '.resolved|join(",")' ".github/workflows/ci.yml,src/a.ts"
+dcheck "a dot-directory inside prose still matches" \
+    '.midSentence|join(",")' ".circleci/config.yml"
+dcheck "the path is not ALSO matched one char in" '.noDoubleMatch' 1
+
+cat > "$TMP/badext.json" <<'JSON'
+{ "project": { "name": "x", "mainBranch": "main" }, "queue": { "path": "q.json" },
+  "anchors": [ { "id": "t", "cmd": "true" } ],
+  "extract": { "fileExtensions": [".md"] } }
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/badext.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'not a bare extension' <<< "$out" \
+    && ok "refuses \".md\" — the dot is a silent no-match" \
+    || no "refuses \".md\" — the dot is a silent no-match"
+
+# ── companions ───────────────────────────────────────────────────────────────
+#
+# `pairedArtifacts` COMPELS a counterpart, but `files` is scraped from citations
+# and a map entry cites the code it is about — not the test that does not exist
+# yet. So the harness demanded a file no file list granted, and the builder's
+# only moves were to fail its own anchor or to leave scope and be rejected.
+# Watched happen on a live project; every party behaved correctly and the node
+# was still lost.
+echo
+echo "── companions ──"
+comp_out=$(node --input-type=module -e '
+import { pairedArtifactFor, withCompanions }
+    from "'"$REPO"'/.claude/harness-core/lib/extract.mjs";
+const rules = [{ id: "unit", srcDir: "src", srcExt: ".tsx",
+                 pairPath: "src/__tests__/{name}.test.tsx",
+                 excludeDirs: ["src/__tests__"] }];
+console.log(JSON.stringify({
+    derived:    pairedArtifactFor("src/feat/Alpha.tsx", rules),
+    notForTest: pairedArtifactFor("src/__tests__/Alpha.test.tsx", rules),
+    notForExt:  pairedArtifactFor("src/util.ts", rules),
+    notOutside: pairedArtifactFor("web/Alpha.tsx", rules),
+    prefixOnly: pairedArtifactFor("srcfoo/Alpha.tsx", rules),
+    granted:    withCompanions(["src/feat/Alpha.tsx"], { pairedArtifacts: rules }),
+    handSeeded: withCompanions(["package.json"], { companions: { "package.json": ["package-lock.json"] } }),
+    empty:      withCompanions([], { pairedArtifacts: rules }),
+}));' 2>&1)
+ccheck() { local got; got=$(jq -r "$2" <<< "$comp_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+ccheck "the paired counterpart is DERIVED from the gate's own rule" \
+    '.derived' "src/__tests__/Alpha.test.tsx"
+ccheck "a test file does not get a test of its own" '.notForTest' null
+ccheck "a non-matching extension gets nothing" '.notForExt' null
+ccheck "a file outside srcDir gets nothing" '.notOutside' null
+ccheck "srcDir matches on a path SEGMENT, not a string prefix" '.prefixOnly' null
+ccheck "the counterpart lands in the item's file set" \
+    '.granted|join(",")' "src/__tests__/Alpha.test.tsx,src/feat/Alpha.tsx"
+ccheck "a hand-seeded companion is granted too" \
+    '.handSeeded|join(",")' "package-lock.json,package.json"
+# Companions apply to what was FOUND. They must never turn an item with no
+# derivable files into a dispatchable one.
+ccheck "companions cannot rescue an item that cited nothing" '.empty|length' 0
+
 # ── partitioner ──────────────────────────────────────────────────────────────
 echo
 echo "── partitioner ──"
@@ -198,6 +355,453 @@ check "wave 0 holds every non-exclusive node" \
 expect "refuses an unknown item id" 1 node "$PB" nope
 expect "refuses when every selection is refused" 1 node "$PB" h i
 expect "human-readable output renders" 0 node "$PB" a b
+
+# ── the exclusive bridge ─────────────────────────────────────────────────────
+#
+# An exclusive item must form NO edges. It used to be unioned like everything
+# else and only skipped when EMITTING groups, which made it a bridge: two items
+# that collide with nothing except the repo-wide item were merged into one serial
+# node, and that node inherited the repo-wide item's files as files it OWNED.
+#
+# Its own queue and config, so the assertions above keep their fixture.
+echo
+echo "── exclusive bridge ──"
+cat > "$REPO/.claude/work/BRIDGE.json" <<'JSON'
+{
+  "items": [
+    { "id": "P1", "title": "shares x with the exclusive item", "status": "open",
+      "scope": "bounded", "files": ["src/p1.ts", "src/x.ts"], "newFiles": [] },
+    { "id": "P2", "title": "shares y with the exclusive item", "status": "open",
+      "scope": "bounded", "files": ["src/p2.ts", "src/y.ts"], "newFiles": [] },
+    { "id": "R1", "title": "refs the exclusive item", "status": "open",
+      "scope": "bounded", "files": ["src/r1.ts"], "newFiles": [], "mapRef": "H" },
+    { "id": "R2", "title": "also refs the exclusive item", "status": "open",
+      "scope": "bounded", "files": ["src/r2.ts"], "newFiles": [], "mapRef": "H" },
+    { "id": "H", "title": "rewrites a convention", "status": "open",
+      "scope": "repo-wide", "files": ["src/x.ts", "src/y.ts"], "newFiles": [] },
+
+    { "id": "D1", "title": "dense 1", "status": "open", "scope": "bounded",
+      "files": ["src/dense.ts"], "newFiles": [] },
+    { "id": "D2", "title": "dense 2", "status": "open", "scope": "bounded",
+      "files": ["src/dense.ts"], "newFiles": [] },
+    { "id": "D3", "title": "dense 3", "status": "open", "scope": "bounded",
+      "files": ["src/dense.ts"], "newFiles": [] },
+    { "id": "D4", "title": "dense 4", "status": "open", "scope": "bounded",
+      "files": ["src/dense.ts"], "newFiles": [] },
+    { "id": "D5", "title": "dense 5", "status": "open", "scope": "bounded",
+      "files": ["src/dense.ts"], "newFiles": [] }
+  ]
+}
+JSON
+sed 's#work/QUEUE.json#work/BRIDGE.json#' "$REPO/.claude/harness.config.json" \
+    > "$TMP/bridge.json"
+P=$(SPRINT_HARNESS_CONFIG="$TMP/bridge.json" node "$PB" P1 P2 R1 R2 H --json 2>/dev/null)
+
+check "a repo-wide item does not bridge two items that share a file with it" \
+    '[.nodes[]|select((.items|map(.id)|sort)==["P1","P2"])]|length' 0
+check "a repo-wide item does not bridge two items that REF it" \
+    '[.nodes[]|select((.items|map(.id)|sort)==["R1","R2"])]|length' 0
+check "no node holds more than one item — nothing here actually collides" \
+    '[.nodes[]|select(.items|length>1)]|length' 0
+check "fan-out width survives the exclusive item" \
+    '.parallelWidth' 4
+check "the exclusive item is still sequenced into its own wave" \
+    '[.nodes[]|select(.nodeId=="H")][0].wave' 1
+# The bridge's worst effect: node.files is the UNION of a group's members and
+# becomes the builder's "files this node owns" list. P1 declares x and P2
+# declares y, so each owning its own is correct; the bridge gave BOTH builders
+# BOTH files, and neither item had declared the other's.
+check "no wave-0 node owns a file none of its items declared" \
+    '[.nodes[]|select(.wave==0)|select((.files|index("src/x.ts")) and (.files|index("src/y.ts")))]|length' 0
+check "an item that merely REFS the exclusive one owns only its own file" \
+    '[.nodes[]|select(.nodeId=="R1")][0].files|join(",")' "src/r1.ts"
+# Sequenced, not grouped — the overlap is real and must stay VISIBLE.
+check "the overlap is reported as cross-wave instead" \
+    '[.crossWaveFiles[]|select(.file=="src/x.ts")]|length' 1
+
+# ── "there is no graph here" ─────────────────────────────────────────────────
+#
+# "When not to use this" was documented and never enforced. A one-wide batch is
+# not a cheaper loop, it is the same loop plus a builder handoff and N verifiers.
+echo
+echo "── not a graph ──"
+P=$(SPRINT_HARNESS_CONFIG="$TMP/bridge.json" node "$PB" P1 --json 2>/dev/null)
+check "a width-1 batch is flagged, not silently emitted" \
+    '[.advisories[]|select(test("THERE IS NO GRAPH"))]|length' 1
+P=$(SPRINT_HARNESS_CONFIG="$TMP/bridge.json" node "$PB" P1 P2 --json 2>/dev/null)
+check "a genuinely parallel batch carries no advisory" \
+    '.advisories|length' 0
+
+# The density trap: one node with many items is one builder doing them serially.
+# That is correct behaviour, but it is the original loop with a 4x tax, so the
+# partitioner has to say so rather than let it be discovered in the diff.
+P=$(SPRINT_HARNESS_CONFIG="$TMP/bridge.json" node "$PB" D1 D2 D3 D4 D5 --json 2>/dev/null)
+check "five items on one file collapse to a single serial node" \
+    '[.nodes[]|select(.items|length==5)]|length' 1
+check "a dense node is flagged as having no fan-out inside it" \
+    '[.advisories[]|select(test("no fan-out inside a node"))]|length' 1
+
+# Explicit ids still WORK at width 1 — re-verifying one rejected node is a real
+# workflow. It is --auto, the machine PROPOSING a batch, that must not offer one.
+expect "explicit ids still plan a width-1 batch" 0 \
+    env SPRINT_HARNESS_CONFIG="$TMP/bridge.json" node "$PB" P1
+expect "--auto REFUSES to propose a batch that is not a graph" 1 \
+    env SPRINT_HARNESS_CONFIG="$TMP/bridge.json" node "$PB" --auto 1
+
+# ── scope gate ───────────────────────────────────────────────────────────────
+#
+# "Do not touch files outside this node's list" was prose in three places — the
+# builder contract, the intent lens and the integrate step. Scar #7: a rule in a
+# prompt is a suggestion. It is a set difference, so it is an exit code.
+echo
+echo "── scope gate ──"
+SG="$REPO/.claude/harness-core/scope-gate.sh"
+SC="$TMP/scope"; mkdir -p "$SC/src"
+git init -q "$SC"; git -C "$SC" config user.email t@t.t; git -C "$SC" config user.name t
+for f in a b c; do echo "// $f" > "$SC/src/$f.ts"; done
+cat > "$SC/plan.json" <<'JSON'
+{ "nodes": [
+  { "nodeId": "n1", "wave": 0, "exclusive": false, "files": ["src/a.ts"] },
+  { "nodeId": "n2", "wave": 0, "exclusive": false, "files": ["src/b.ts"] },
+  { "nodeId": "hw", "wave": 1, "exclusive": true,  "files": ["src/a.ts"] }
+] }
+JSON
+git -C "$SC" add -A && git -C "$SC" commit -qm init
+git -C "$SC" branch -M main
+git -C "$SC" checkout -qb work
+echo "// edited" >> "$SC/src/a.ts"; git -C "$SC" commit -qam "in scope"
+
+sg() { ( cd "$SC" && bash "$SG" "$@" >/dev/null 2>&1 ); }
+sg main plan.json n1 && ok "passes when every changed file is declared" \
+                     || no "passes when every changed file is declared"
+
+echo "// sneaky" >> "$SC/src/c.ts"; git -C "$SC" commit -qam "out of scope"
+sg main plan.json n1 && no "FAILS on a file the node does not own" \
+                     || ok "FAILS on a file the node does not own"
+sg_out=$( cd "$SC" && bash "$SG" main plan.json n1 2>&1 )
+grep -q "src/c.ts" <<< "$sg_out" && ok "names the undeclared file" || no "names the undeclared file"
+
+# The union of a wave is what the MERGED tree is allowed to contain. Per-node
+# green does not imply merged green.
+sg main plan.json --wave 0 && no "wave mode gates the merged tree too" \
+                           || ok "wave mode gates the merged tree too"
+sg main --files "src/a.ts src/c.ts" && ok "an explicit --files list is accepted" \
+                                    || no "an explicit --files list is accepted"
+
+# An exclusive node's file list is incomplete BY CONSTRUCTION. Gating it against
+# that list would reject every repo-wide node on sight.
+sg main plan.json hw && ok "an exclusive node is EXEMPT, not failed" \
+                     || no "an exclusive node is EXEMPT, not failed"
+ex_out=$( cd "$SC" && bash "$SG" main plan.json hw 2>&1 )
+grep -q "EXEMPT" <<< "$ex_out" && ok "the exemption is stated, not silent" \
+                               || no "the exemption is stated, not silent"
+
+# Environment errors must be exit 2, distinct from a real violation (1).
+( cd "$SC" && bash "$SG" no-such-ref plan.json n1 >/dev/null 2>&1 )
+[ $? -eq 2 ] && ok "a missing base ref is exit 2, not a violation" \
+             || no "a missing base ref is exit 2, not a violation"
+( cd "$SC" && bash "$SG" main plan.json no-such-node >/dev/null 2>&1 )
+[ $? -eq 2 ] && ok "an unknown nodeId is exit 2" || no "an unknown nodeId is exit 2"
+
+# ── anchor placeholders ──────────────────────────────────────────────────────
+#
+# `{base}` resolves to the NODE'S base, not project.mainBranch. A gate that diffs
+# against a ref must be told which ref; judged against main on a stacked branch,
+# every node inherits every earlier node's failures and the gate stops
+# discriminating exactly when the stack is deepest.
+echo
+echo "── anchor placeholders ──"
+ph_out=$(node -e '
+const fs = require("fs");
+const src = fs.readFileSync("'"$REPO"'/.claude/harness-core/sprint-batch.mjs", "utf8");
+const body = src.replace(/^export const meta[\s\S]*?\n};\n/, "");
+const plan = {
+  baseBranch: "sprint/base-7", batchName: "b", wave: 0,
+  nodes: [{ nodeId: "n1", wave: 0, exclusive: false, files: ["src/a.ts"],
+            items: [{ id: "n1", title: "t", detail: "d" }] }],
+  harness: {
+    anchors: [{ id: "gate", cmd: "gate.sh {base}", cwd: ".", always: false, whenTouches: ["src/"] },
+              { id: "keep", cmd: "echo ${SHELL_VAR} ok", cwd: ".", always: true }],
+    setup: [], lenses: ["intent","invariants","anchors"], requireAllLenses: true,
+    agents: {}, branchPrefix: "sprint", mainBranch: "main",
+    scopeGate: ".claude/harness-core/scope-gate.sh",
+  },
+};
+const seen = [];
+const fn = new Function("args","log","agent","parallel","pipeline","phase",
+  `return (async()=>{${body}})()`);
+fn(plan, () => {}, (p) => { seen.push(p); return Promise.resolve(null); },
+   (t) => Promise.all(t.map(f => f())), async (items, ...stages) => {
+     let out = [];
+     for (const it of items) { let v = it; for (const st of stages) v = await st(v, it, 0); out.push(v); }
+     return out;
+   }, () => {}).then(() => {
+     const p = seen.join("\n");
+     console.log(JSON.stringify({
+       resolved: /gate\.sh sprint\/base-7/.test(p),
+       notMain: !/gate\.sh main/.test(p),
+       shellVarIntact: /echo \$\{SHELL_VAR\} ok/.test(p),
+       nullInstruction: /report gate: null/.test(p),
+     }));
+   }).catch(e => console.log(JSON.stringify({ error: String(e.message) })));' 2>&1)
+
+pcheck() { local got; got=$(jq -r "$2" <<< "$ph_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3; out: $(head -c 200 <<< "$ph_out"))"; }
+pcheck "{base} resolves to the node's base branch" '.resolved' true
+pcheck "...and NOT to project.mainBranch" '.notMain' true
+pcheck "a shell \${VAR} is left alone" '.shellVarIntact' true
+pcheck "a conditional anchor is told to report null" '.nullInstruction' true
+
+# An unknown placeholder must THROW before any agent spawns, not reach the shell
+# as a literal ref name and exit 2 (which reads as "this node is broken").
+bad_out=$(node -e '
+const fs = require("fs");
+const src = fs.readFileSync("'"$REPO"'/.claude/harness-core/sprint-batch.mjs", "utf8");
+const body = src.replace(/^export const meta[\s\S]*?\n};\n/, "");
+const plan = { baseBranch: "b", nodes: [{ nodeId: "n", wave: 0, files: [], items: [] }],
+  harness: { anchors: [{ id: "x", cmd: "gate.sh {basebranch}", always: true }], setup: [],
+    lenses: ["a"], requireAllLenses: true, agents: {}, branchPrefix: "s", mainBranch: "main" } };
+new Function("args","log","agent","parallel","pipeline","phase", `return (async()=>{${body}})()`)
+  (plan, ()=>{}, ()=>Promise.resolve(null), ()=>Promise.resolve([]), ()=>Promise.resolve([]), ()=>{})
+  .then(()=>console.log("NO THROW")).catch(e=>console.log(e.message));' 2>&1)
+grep -q "unknown placeholder {basebranch}" <<< "$bad_out" \
+    && ok "an unknown placeholder throws, naming the key" \
+    || no "an unknown placeholder throws, naming the key ($(head -c 160 <<< "$bad_out"))"
+
+# ── reduce ───────────────────────────────────────────────────────────────────
+#
+# The reduce decides what a batch MEANS — accepted vs rejected vs unverified,
+# whether a partial run is reported as complete, and whether the builder's
+# claimed exit codes match what an independent agent observed. It was the only
+# load-bearing code in the kit with no test behind it, because a Workflow script
+# cannot be imported and this file could therefore only PARSE it.
+#
+# core/reduce-fixture.mjs slices the real reduce out of the shipped file and runs
+# known-bad results through it. Zero agents, zero tokens.
+echo
+echo "── reduce ──"
+RF="$REPO/.claude/harness-core/reduce-fixture.mjs"
+SB="$REPO/.claude/harness-core/sprint-batch.mjs"
+if [ ! -f "$RF" ]; then
+    no "install.sh ships the reduce fixture"
+else
+    ok "install.sh ships the reduce fixture"
+    rf_out=$(node "$RF" "$SB" 2>/dev/null)
+    while IFS='|' read -r verdict desc; do
+        [ -n "$desc" ] || continue
+        [ "$verdict" = "ok" ] && ok "reduce: $desc" || no "reduce: $desc"
+    done <<< "$rf_out"
+
+    # The fixture is only worth having if it FAILS on a regression. Mutate the
+    # three classifications that scars #2 and #14 exist for and confirm each is
+    # caught. A test that cannot fail is the thing this whole kit argues against.
+    mutate() { # <desc> <sed-expr>
+        sed "$2" "$SB" > "$TMP/mutant.mjs"
+        # A mutation test that did not mutate proves nothing, and it fails for a
+        # reason that looks identical to a real miss. Say which one it was: these
+        # patterns pin exact source text and WILL rot the next time the reduce is
+        # edited, which is the point at which the message matters most.
+        if cmp -s "$SB" "$TMP/mutant.mjs"; then
+            no "reduce fixture CATCHES: $1 (PATTERN DID NOT MATCH — update the sed, not the code)"
+            return
+        fi
+        if node "$RF" "$TMP/mutant.mjs" >/dev/null 2>&1; then
+            no "reduce fixture CATCHES: $1"
+        else
+            ok "reduce fixture CATCHES: $1"
+        fi
+    }
+    mutate "unverified collapsed into rejected (scar #2)" "s/: 'unverified';/: 'rejected';/"
+    mutate "a missing scope gate defaulted to 0 (scar #8)" "s/r.build?.scopeGate ?? null;/r.build?.scopeGate ?? 0;/"
+    mutate "scope violation dropped from acceptance" "s/&& rejects.length === 0 && scopeClean;/\&\& rejects.length === 0;/"
+    mutate "anchor disagreement check disabled (scar #14)" \
+        "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (false) {/"
+    mutate "single reject downgraded to a majority vote" "s/rejects.length === 0 && scopeClean;/rejects.length < passes.length && scopeClean;/"
+    mutate "a not-applicable anchor compared as a number (E#19)" \
+        "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (observed[k] !== claimed[k]) {/"
+    mutate "a skipped ALWAYS-run anchor treated as success" \
+        "s/if (claimed?.\[k\] === undefined || claimed?.\[k\] === null) {/if (false) {/"
+    mutate "fan-in guard removed" "s/^if (lost > 0) {/if (false) {/"
+
+    # And it must refuse rather than silently pass if someone moves the markers.
+    grep -v "REDUCE-BEGIN" "$SB" > "$TMP/nomarker.mjs"
+    node "$RF" "$TMP/nomarker.mjs" >/dev/null 2>&1
+    [ $? -eq 2 ] && ok "reduce fixture REFUSES a file whose markers moved" \
+                 || no "reduce fixture REFUSES a file whose markers moved"
+fi
+
+# ── integrate ────────────────────────────────────────────────────────────────
+#
+# Was a `{{INTEGRATE}}` placeholder and three sentences of prose. It is the step
+# between "every node passed" and "the thing they add up to passes".
+echo
+echo "── integrate ──"
+IG="$REPO/.claude/harness-core/integrate.sh"
+
+# Rebuild a throwaway repo per scenario — integrate MOVES BRANCHES, so scenarios
+# cannot share one.
+mk_integ() { # <dir>
+    local D="$1"; rm -rf "$D"; mkdir -p "$D/src" "$D/.claude"
+    git init -q "$D"; git -C "$D" config user.email t@t.t; git -C "$D" config user.name t
+    printf 'a\n' > "$D/src/a.ts"; printf 'b\n' > "$D/src/b.ts"; printf 'c\n' > "$D/src/c.ts"
+    cat > "$D/.claude/harness.config.json" <<'JSON'
+{ "project": { "name": "i", "mainBranch": "main" }, "queue": { "path": "q.json" },
+  "anchors": [ { "id": "ok", "cmd": "test ! -f src/POISON", "cwd": "." } ] }
+JSON
+    printf 'plan.json\nreport.json\n' > "$D/.gitignore"
+    git -C "$D" add -A && git -C "$D" commit -qm init && git -C "$D" branch -M main
+    cat > "$D/plan.json" <<'JSON'
+{ "nodes": [ { "nodeId": "n1", "wave": 0, "exclusive": false, "files": ["src/a.ts"] },
+             { "nodeId": "n2", "wave": 0, "exclusive": false, "files": ["src/b.ts"] },
+             { "nodeId": "hw", "wave": 1, "exclusive": true,  "files": ["src/c.ts"] } ] }
+JSON
+}
+# branch <dir> <node> <file> <line>
+mk_branch() {
+    git -C "$1" checkout -q -b "sprint/b/$2" main
+    echo "$4" >> "$1/src/$3.ts"
+    git -C "$1" commit -qam "$2"
+    git -C "$1" checkout -q main
+}
+report() { printf '%s\n' "$2" > "$1/report.json"; }
+
+D="$TMP/i1"; mk_integ "$D"
+mk_branch "$D" n1 a "// n1"; mk_branch "$D" n2 b "// n2"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" },
+  { "nodeId": "n2", "outcome": "accepted", "branch": "sprint/b/n2" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 0 ] && ok "merges an all-accepted wave" || no "merges an all-accepted wave"
+grep -q "anchors on the merged tree" <<< "$ig_out" \
+    && ok "re-runs the anchors on the MERGED tree" || no "re-runs the anchors on the MERGED tree"
+[ "$(git -C "$D" rev-list --count main)" -ge 4 ] \
+    && ok "the merges actually landed on the base" || no "the merges actually landed on the base"
+
+# REGRESSION. The merges land ON $BASE, so after wave 0 the ref no longer points
+# where the batch started and `$BASE...HEAD` compares the merged tree to itself.
+# The gate then reports "nothing to check" and exits 0 — green, for a merge it
+# never examined. Caught while testing this script; the base is pinned to a SHA.
+D="$TMP/i2"; mk_integ "$D"
+mk_branch "$D" n1 a "// n1"
+mk_branch "$D" n2 c "// undeclared: no node in wave 0 owns src/c.ts"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" },
+  { "nodeId": "n2", "outcome": "accepted", "branch": "sprint/b/n2" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -ne 0 ] && ok "CATCHES an undeclared path in the merged tree" \
+                 || no "CATCHES an undeclared path in the merged tree"
+grep -q "src/c.ts" <<< "$ig_out" \
+    && ok "names the undeclared path in the merge" || no "names the undeclared path in the merge"
+
+# A report carrying warnings is a report whose numbers nobody stands behind.
+D="$TMP/i3"; mk_integ "$D"; mk_branch "$D" n1 a "// n1"
+report "$D" '{ "warnings": ["n1: ANCHOR DISAGREEMENT on test"], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 1 ] && ok "REFUSES a report that carries warnings" \
+                 || no "REFUSES a report that carries warnings"
+[ "$(git -C "$D" rev-list --count main)" -eq 1 ] \
+    && ok "a refused integrate leaves the base untouched" || no "a refused integrate leaves the base untouched"
+
+# `unverified` is not `rejected` and it is also not mergeable.
+D="$TMP/i4"; mk_integ "$D"; mk_branch "$D" n1 a "// n1"; mk_branch "$D" n2 b "// n2"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" },
+  { "nodeId": "n2", "outcome": "unverified", "branch": "sprint/b/n2" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 0 ] && ok "merges the accepted node beside an unverified one" \
+                 || no "merges the accepted node beside an unverified one"
+grep -q "NOT merging" <<< "$ig_out" && ok "says which nodes it skipped and why" \
+                                    || no "says which nodes it skipped and why"
+git -C "$D" log --oneline main | grep -q "n2" \
+    && no "an unverified node is NOT merged" || ok "an unverified node is NOT merged"
+
+# Wave order is the whole reason waves exist.
+D="$TMP/i5"; mk_integ "$D"; mk_branch "$D" n1 a "// n1"; mk_branch "$D" hw c "// repo-wide"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" },
+  { "nodeId": "hw", "outcome": "accepted", "branch": "sprint/b/hw" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 0 ] && ok "merges across waves" || no "merges across waves"
+[ "$(grep -n 'wave 0: n1' <<< "$ig_out" | cut -d: -f1)" -lt \
+  "$(grep -n 'wave 1: hw' <<< "$ig_out" | cut -d: -f1)" ] \
+    && ok "wave 0 merges BEFORE wave 1" || no "wave 0 merges BEFORE wave 1"
+
+# A conflict between two ACCEPTED nodes means the partition was wrong. Abort and
+# restore — a hand-resolution is code no builder wrote and no verifier will see.
+D="$TMP/i6"; mk_integ "$D"
+git -C "$D" checkout -q -b sprint/b/n1 main; printf 'ONE\n' > "$D/src/a.ts"
+git -C "$D" commit -qam n1; git -C "$D" checkout -q main
+git -C "$D" checkout -q -b sprint/b/n2 main; printf 'TWO\n' > "$D/src/a.ts"
+git -C "$D" commit -qam n2; git -C "$D" checkout -q main
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" },
+  { "nodeId": "n2", "outcome": "accepted", "branch": "sprint/b/n2" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 1 ] && ok "ABORTS on a conflict between two accepted nodes" \
+                 || no "ABORTS on a conflict between two accepted nodes"
+[ -z "$(git -C "$D" status --porcelain)" ] \
+    && ok "an aborted merge leaves a clean tree" || no "an aborted merge leaves a clean tree"
+grep -q "partition was WRONG" <<< "$ig_out" \
+    && ok "says a conflict means the partition was wrong" \
+    || no "says a conflict means the partition was wrong"
+
+# Per-node green does not imply merged green.
+D="$TMP/i7"; mk_integ "$D"
+git -C "$D" checkout -q -b sprint/b/n1 main; touch "$D/src/POISON"
+git -C "$D" add -A; git -C "$D" commit -qm n1; git -C "$D" checkout -q main
+sed -i 's#"files": \["src/a.ts"\]#"files": ["src/a.ts", "src/POISON"]#' "$D/plan.json"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 1 ] && ok "FAILS on red anchors on the merged tree" \
+                 || no "FAILS on red anchors on the merged tree"
+grep -q "RED ANCHORS ON THE MERGED TREE" <<< "$ig_out" \
+    && ok "names merged-tree failure as its own class" \
+    || no "names merged-tree failure as its own class"
+
+# A generated file is the paired artifact of every file that feeds it, and no
+# node's file list can name it. integrate.sh rebuilds it after the scope gate
+# (which judges what the BUILDERS changed) and before the anchors.
+D="$TMP/i8"; mk_integ "$D"
+jq '.regenerate = [{"cmd":"printf \"gen:%s\\n\" \"$(cat src/a.ts)\" > src/GENERATED","cwd":"."}]' \
+    "$D/.claude/harness.config.json" > "$D/.claude/tmp.json" && mv "$D/.claude/tmp.json" "$D/.claude/harness.config.json"
+printf 'gen:a\n' > "$D/src/GENERATED"
+git -C "$D" add -A && git -C "$D" commit -qm "add generated artifact"
+mk_branch "$D" n1 a "// n1 changes the source the artifact is generated from"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 0 ] && ok "integrates with a regenerate step" || no "integrates with a regenerate step"
+grep -q "regenerating 1 artifact" <<< "$ig_out" \
+    && ok "runs the regenerate commands" || no "runs the regenerate commands"
+grep -q "regeneration changed 1 file" <<< "$ig_out" \
+    && ok "notices the generated file moved" || no "notices the generated file moved"
+grep -q "n1 changes the source" "$D/src/GENERATED" \
+    && ok "the regenerated artifact reflects the merged source" \
+    || no "the regenerated artifact reflects the merged source"
+[ -z "$(git -C "$D" status --porcelain)" ] \
+    && ok "the regeneration is COMMITTED with the merge" \
+    || no "the regeneration is COMMITTED with the merge"
+# The scope gate must not blame the batch for a file this script wrote.
+grep -q "SCOPE VIOLATION" <<< "$ig_out" \
+    && no "regeneration does not trip the scope gate" \
+    || ok "regeneration does not trip the scope gate"
+
+# A failing regenerate command must stop before the anchors run on a tree whose
+# generated files are unknown.
+D="$TMP/i9"; mk_integ "$D"
+jq '.regenerate = [{"cmd":"exit 3","cwd":"."}]' \
+    "$D/.claude/harness.config.json" > "$D/.claude/tmp.json" && mv "$D/.claude/tmp.json" "$D/.claude/harness.config.json"
+git -C "$D" add -A && git -C "$D" commit -qm cfg
+mk_branch "$D" n1 a "// n1"
+report "$D" '{ "warnings": [], "nodes": [
+  { "nodeId": "n1", "outcome": "accepted", "branch": "sprint/b/n1" } ] }'
+ig_out=$( cd "$D" && bash "$IG" main plan.json report.json 2>&1 ); ig_rc=$?
+[ $ig_rc -eq 1 ] && ok "a failing regenerate stops the integrate" \
+                 || no "a failing regenerate stops the integrate"
+grep -q "anchors on the merged tree" <<< "$ig_out" \
+    && no "...before the anchors run" || ok "...before the anchors run"
 
 # ── push guard ───────────────────────────────────────────────────────────────
 echo

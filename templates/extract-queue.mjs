@@ -18,8 +18,8 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { loadConfig } from "../../core/lib/config.mjs";
 import {
-    trackedFiles, buildResolver, citedFiles,
-    mergeQueueState, collisionReport, assertScope,
+    trackedFiles, buildResolver, citedFiles, DEFAULT_EXTENSIONS,
+    withCompanions, mergeQueueState, collisionReport, assertScope,
 } from "../../core/lib/extract.mjs";
 
 const cfg = loadConfig();
@@ -76,6 +76,37 @@ const resolveCited = buildResolver(tracked, {
 // Anything that cannot answer that gets a `scope` instead — see SCOPES in
 // core/lib/extract.mjs. `note` is mandatory for anything you refuse: the note is
 // what tells the next person how to un-refuse it.
+// ── COMPANIONS ───────────────────────────────────────────────────────────────
+//
+// A file that another file CANNOT MOVE WITHOUT, applied to whatever the scraper
+// already found. NOT an OVERRIDES entry and it does not weaken the ration on
+// them: an OVERRIDES entry names an ITEM and asserts a human decision about that
+// item's scope. This names a FILE RELATIONSHIP that holds for every item,
+// forever, so it cannot smuggle scope onto work the map cannot describe.
+//
+// Your `pairedArtifacts` counterparts are added AUTOMATICALLY from config — you
+// do not list them here. This table is for the relationships no rule can derive.
+//
+// UNDER-MAPPING IS SAFE AND OVER-MAPPING IS NOT. A file absent from this table
+// behaves as it does today: the builder stops and reports `outOfScope`. A WRONG
+// entry puts two builders in one file, which is the failure the whole collision
+// graph exists to prevent. Map only where the relationship is unambiguous —
+// never merely "this test imports that module".
+const COMPANIONS = {
+    // A manifest cannot move without its lockfile — `npm ci` fails on an
+    // out-of-sync one, so an item that claims the manifest must claim the lock.
+    // "web/package.json": ["web/package-lock.json"],
+    // "api/pyproject.toml": ["api/uv.lock"],
+
+    // A module and the test that covers it, where the suite is grouped by
+    // FEATURE rather than by module and no pairPath rule can express it.
+    // "api/src/pkg/parser.py":  ["api/tests/test_ingest.py"],
+    // "api/src/pkg/loader.py":  ["api/tests/test_ingest.py"],
+};
+
+// ── OVERRIDES ────────────────────────────────────────────────────────────────
+//
+// (see the block above for what belongs here versus in COMPANIONS)
 const OVERRIDES = {
     // "item-id": {
     //     files: ["path/one.ts", "path/two.ts"],
@@ -99,9 +130,16 @@ const problems = [];
 
 const textOf = (o) => (typeof o === "string" ? o : JSON.stringify(o));
 
+// The extensions the scraper can see. THIS IS THE PARTITIONER — an extension
+// missing here is a file the collision graph cannot see. Set
+// `extract.fileExtensions` in harness.config.json for a repo whose work is not
+// application source; a content site needs md/mdx/svg/png or its collisions are
+// invisible.
+const EXTENSIONS = cfg.extract?.fileExtensions ?? DEFAULT_EXTENSIONS;
+
 function push({ id, source, severity, title, detail, extra = {} }) {
     const text = [title, textOf(detail)].join("\n");
-    const { files, problems: p } = citedFiles(text, resolveCited);
+    const { files, problems: p } = citedFiles(text, resolveCited, { extensions: EXTENSIONS });
     problems.push(...p.map((x) => ({ ...x, item: id })));
 
     const o = OVERRIDES[id] ?? {};
@@ -113,7 +151,21 @@ function push({ id, source, severity, title, detail, extra = {} }) {
     // — even in passing, even as a cross-reference — lands in that item's file
     // set and can MANUFACTURE A FALSE COLLISION. When you write map prose, name
     // the files you intend to EDIT; describe everything else without a path.
-    const merged = [...new Set([...files, ...(o.files ?? [])])].sort();
+    const cited = [...new Set([...files, ...(o.files ?? [])])].sort();
+
+    // Grant the companions of whatever was cited. This is what makes a paired
+    // artifact REACHABLE: the gate compels `pairPath`, and until this ran, no
+    // file list ever contained it, so the builder had to choose between failing
+    // its own anchor and leaving scope.
+    const merged = withCompanions(cited, {
+        pairedArtifacts: cfg.pairedArtifacts,
+        companions: COMPANIONS,
+    });
+
+    // A companion that does not exist yet is a file to CREATE, and the builder
+    // prompt marks the two differently. Telling a builder an absent test file
+    // already exists is a small lie that costs it a confused read of the tree.
+    const exists = (f) => tracked.includes(f);
 
     items.push(assertScope({
         id,
@@ -121,8 +173,8 @@ function push({ id, source, severity, title, detail, extra = {} }) {
         severity: severity ?? "medium",
         title,
         detail: textOf(detail),
-        files: merged,
-        newFiles: o.newFiles ?? [],
+        files: merged.filter(exists),
+        newFiles: [...new Set([...(o.newFiles ?? []), ...merged.filter((f) => !exists(f))])].sort(),
         scope: o.scope ?? (merged.length ? "bounded" : "unscoped"),
         scopeNote: o.note ?? null,
         dispatchable: o.dispatchable ?? !["external", "duplicate", "needs-design", "held"].includes(o.scope),
@@ -180,10 +232,30 @@ if (vanished.length) {
     for (const v of vanished) console.log(`  ${v.id}  (was ${v.status})`);
 }
 
-if (problems.length) {
-    console.log(`\nUNRESOLVED / AMBIGUOUS citations (${problems.length}) — each is a hole in the collision graph:`);
-    for (const p of problems.slice(0, 20)) {
+// The regex SUGGESTS; it does not get to quietly decide what collides. Anything
+// it could not resolve — and anything path-shaped it was not configured to see —
+// is printed rather than dropped.
+const unknownExt = problems.filter((p) => p.unknownExtension);
+const unresolved = problems.filter((p) => !p.unknownExtension);
+
+if (unresolved.length) {
+    console.log(`\nUNRESOLVED / AMBIGUOUS citations (${unresolved.length}) — each is a hole in the collision graph:`);
+    for (const p of unresolved.slice(0, 20)) {
         console.log(`  [${p.item}] ${p.cited}  ${p.ambiguous ? `AMBIGUOUS -> ${p.ambiguous.join(" | ")}` : "unresolved"}`);
     }
     console.log("  Fix by adding an alias, a dirHint, or an OVERRIDES files entry.");
+}
+
+if (unknownExt.length) {
+    const exts = [...new Set(unknownExt.map((p) => p.unknownExtension))].sort();
+    console.log(`\n⚠ INVISIBLE FILE TYPES (${unknownExt.length} path(s), ${exts.length} extension(s)):`);
+    console.log(`  These paths are TRACKED IN GIT and cited by an item, but their extension is`);
+    console.log(`  not in extract.fileExtensions — so the collision graph cannot see them, and`);
+    console.log(`  two items editing one of them would be fanned out in PARALLEL.`);
+    for (const p of unknownExt.slice(0, 20)) {
+        console.log(`  [${p.item}] ${p.resolved}  (.${p.unknownExtension})`);
+    }
+    console.log(`\n  Fix in .claude/harness.config.json, NOT in core/:`);
+    console.log(`      "extract": { "fileExtensions": [${exts.map((e) => `"${e}"`).join(", ")}, ...] }`);
+    console.log(`  (list the full set you want, including the source extensions you already rely on)`);
 }
