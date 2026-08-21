@@ -427,13 +427,38 @@ const results = await pipeline(
 
     // FAN OUT — one builder per node, each in its own worktree so two nodes
     // physically cannot overwrite each other even if the partition were wrong.
-    (node) => agent(buildPrompt(node), {
-        label: `build:${node.nodeId}`,
-        phase: 'Build',
-        agentType: H.agents.builder,
-        isolation: 'worktree',
-        schema: BUILD_SCHEMA,
-    }),
+    //
+    // A node carrying `prebuilt` SKIPS the builder and is verified as-is. The
+    // object is used verbatim where the builder's return value would go, so the
+    // lenses cannot tell the difference — which is the entire point, and the
+    // reason this is not a separate script with copied prompts.
+    //
+    // Two uses, and the second is why it exists at all:
+    //
+    //   RE-JUDGE. A node rejected on scope is often the FILE LIST's fault, not
+    //   the builder's. Correcting the list and merging on the standing verdicts
+    //   is not the same as a fresh lens judging the corrected node, and until
+    //   now re-judging meant re-running a builder over work already done.
+    //
+    //   CANARY. Plant a branch with a KNOWN defect in it and watch whether the
+    //   lenses find it. A run where every node is accepted is consistent with
+    //   three working lenses and equally consistent with three that are not
+    //   looking, and nothing else in this system can tell those apart — the
+    //   reduce fixture proves the reduce classifies bad input correctly, not
+    //   that any verifier detects anything.
+    //
+    // The claimed anchors in a prebuilt object are DELIBERATELY not validated
+    // against reality: a canary needs to be able to claim a green it did not
+    // earn, so that the claimed-vs-observed comparison has something to catch.
+    (node) => (node.prebuilt
+        ? Promise.resolve(node.prebuilt)
+        : agent(buildPrompt(node), {
+            label: `build:${node.nodeId}`,
+            phase: 'Build',
+            agentType: H.agents.builder,
+            isolation: 'worktree',
+            schema: BUILD_SCHEMA,
+        })),
 
     // VERIFY — fresh skeptics asking DIFFERENT questions. N distinct lenses
     // catch what N identical reviewers cannot.

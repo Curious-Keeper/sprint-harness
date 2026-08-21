@@ -654,6 +654,78 @@ else
                  || no "reduce fixture REFUSES a file whose markers moved"
 fi
 
+# ── prebuilt nodes: re-judge, and the canary ─────────────────────────────────
+#
+# A node carrying `prebuilt` skips the builder and is verified as-is. This runs
+# the SHIPPED graph with stubbed agent/pipeline/parallel — the real dispatch and
+# the real reduce, zero agents — and asserts the builder is not called while
+# every lens still is.
+#
+# It matters because of what the rest of this file CANNOT prove: the reduce
+# fixture shows bad input is classified correctly, not that any verifier detects
+# anything. A run where every node is accepted is consistent with three working
+# lenses and equally consistent with three that are not looking. Planting a known
+# defect and watching for the reject is the only thing that separates them, and
+# it is impossible without a way to verify a branch a builder did not just write.
+echo
+echo "── prebuilt / canary ──"
+cat > "$TMP/prebuilt.mjs" <<'MJS'
+import { readFileSync } from "node:fs";
+const src = readFileSync(process.argv[2], "utf8").replace(/^export const meta/m, "const meta");
+const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+const calls = [];
+const agent = async (prompt, opts) => {
+    calls.push(opts.label);
+    if (opts.label.startsWith("verify:")) {
+        return { lens: opts.label.split(":")[1], verdict: "reject", evidence: ["planted defect found"],
+                 confidence: "high", observedAnchors: { tsc: 0, lint: 0, test: 1 }, observedScopeGate: 0 };
+    }
+    return { status: "done", branch: "b", commit: "abc1234", filesChanged: ["web/a.tsx"],
+             anchors: { tsc: 0, lint: 0, test: 0 }, summary: "built", scopeGate: 0 };
+};
+const parallel = (t) => Promise.all(t.map((f) => f()));
+const pipeline = async (items, ...stages) => {
+    const out = [];
+    for (const [i, item] of items.entries()) { let v = item;
+        for (const s of stages) v = await s(v, item, i); out.push(v); }
+    return out;
+};
+const harness = {
+    anchors: ["tsc", "lint", "test"].map((id) => ({ id, cmd: id, cwd: ".", always: true, whenTouches: null })),
+    setup: [{ cmd: "npm ci", cwd: ".", why: null }],
+    lenses: ["intent", "invariants", "anchors"], requireAllLenses: true,
+    agents: { builder: "sprint-builder", verifier: "sprint-verifier" },
+    branchPrefix: "sprint", mainBranch: "main",
+    scopeGate: ".claude/harness-core/scope-gate.sh", pairedArtifacts: [],
+};
+const node = (id, extra = {}) => ({ nodeId: id, wave: 0, reason: "r", serial: false, files: ["web/a.tsx"],
+    items: [{ id: "x1", title: "t", source: "s", severity: "high", files: ["web/a.tsx"], newFiles: [], detail: "d" }], ...extra });
+const plan = { baseBranch: "base", batchName: "canary", wave: 0, harness, nodes: [
+    node("normal"),
+    node("planted", { prebuilt: { status: "done", branch: "canary/planted", commit: "deadbee",
+        filesChanged: ["web/a.tsx"], anchors: { tsc: 0, lint: 0, test: 0 }, summary: "claims green", scopeGate: 0 } }),
+]};
+const report = await new AsyncFn("args", "log", "agent", "pipeline", "parallel", src)(plan, () => {}, agent, pipeline, parallel);
+const p = report.nodes.find((n) => n.nodeId === "planted");
+console.log(JSON.stringify({
+    builds: calls.filter((c) => c.startsWith("build:")).join(","),
+    lenses: calls.filter((c) => c.startsWith("verify:") && c.endsWith(":planted")).length,
+    outcome: p?.outcome,
+    claimed: p?.claimedAnchors?.test,
+    disagreements: (report.warnings ?? []).filter((w) => /ANCHOR DISAGREEMENT/.test(w)).length,
+}));
+MJS
+pb_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" 2>&1)
+pbcheck() { local got; got=$(jq -r "$2" <<< "$pb_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pbcheck "a prebuilt node does NOT dispatch a builder" '.builds' "build:normal"
+pbcheck "...and is still judged by every lens" '.lenses' 3
+pbcheck "a planted defect comes back REJECTED" '.outcome' "rejected"
+# The claimed anchors must survive UNVALIDATED, or a canary cannot claim a green
+# it did not earn and the claimed-vs-observed check has nothing to catch.
+pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0
+pbcheck "...so the claimed-vs-observed disagreement still fires" '.disagreements' 2
+
 # ── integrate ────────────────────────────────────────────────────────────────
 #
 # Was a `{{INTEGRATE}}` placeholder and three sentences of prose. It is the step
