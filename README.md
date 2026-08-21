@@ -32,7 +32,7 @@ that was never project-specific, separated from the parts that always will be.
         └──────────┴────┬─────┴──────────┘
                    [reduce]                 returned vs dispatched, anchor
                         │                   claimed vs anchor observed
-                  [integrate]               merge in wave order, re-run anchors
+                  [integrate]               integrate.sh: wave order, merged anchors
                         │
                   ┌ HUMAN GATE ┐            you read ONE report, ONE diff
                         │
@@ -68,6 +68,9 @@ the system produces.
 core/                       copied verbatim into a project — never edited
   plan-batch.mjs            the partitioner: union-find, lanes, waves
   sprint-batch.mjs          the graph: fan out → N lenses → plain-code reduce
+  integrate.sh              wave-order merge + regenerate + anchors on the MERGED tree
+  scope-gate.sh             "this node may only touch the files it owns"
+  reduce-fixture.mjs        tests the reduce against known-bad results, zero agents
   preflight.sh              read-only readiness check
   deny-push.sh              PreToolUse hard-deny, fail-closed
   paired-artifact-gate.sh   "changed X must ship changed Y", with an audit trail
@@ -205,7 +208,7 @@ The coordination is overhead unless the work is wide.
 ## Status
 
 Working code, extracted and generalised. `core/` runs and is exercised by
-`selftest.sh` — 81 assertions, currently green.
+`selftest.sh` — 205 assertions, currently green.
 
 **Batches driven under the generalised config: two.** Both on a small Astro site
 with no test suite and no linter, which is a useful stress of the "anchors are

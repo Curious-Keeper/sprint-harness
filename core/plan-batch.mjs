@@ -21,7 +21,9 @@
 //   1b. A declared cross-reference between two SELECTED items is a collision
 //      edge too — they are routinely one job described twice.
 //   2. Any item flagged for a configured LANE joins that lane's single node.
-//   3. scope:"repo-wide" items get an exclusive node in their own wave.
+//   3. scope:"repo-wide" items form NO edges at all and get an exclusive node in
+//      their own wave. Sequencing is the guarantee, not grouping — an exclusive
+//      item left in the graph becomes a BRIDGE between items that do not collide.
 //   4. scope:"unscoped" items are REFUSED — no files means no guarantee.
 //
 // Output is consumed by core/sprint-batch.mjs through the Workflow `args`
@@ -114,8 +116,31 @@ const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) paren
 
 const filesOf = (i) => [...(i.files ?? []), ...(i.newFiles ?? [])];
 
+// An exclusive item forms NO edges — not file edges, not ref edges, not lane
+// edges. It is not grouped with anything; it is SEQUENCED into its own wave
+// below, and that is the whole guarantee.
+//
+// Leaving it in the graph made it a BRIDGE. Two items that share nothing with
+// each other, but which each share one file with a repo-wide item, were unioned
+// through it into a single serial node. Two costs, and the second is the worse
+// one:
+//
+//   1. Width collapses for no reason — the items genuinely do not collide.
+//   2. node.files is the UNION of the group's members, so the merged node was
+//      handed the repo-wide item's files as files it OWNS. A bridge did not just
+//      serialise two builders, it granted them write authority over a third
+//      item's surface, which the exclusive node then claims again a wave later.
+//
+// Found 2026-08-21 from external review of the published write-up, reproduced
+// with P1{p1,x} P2{p2,y} H:repo-wide{x,y}: P1 and P2 merged, and the node's
+// reason printed the bare fallback "grouped" because no shared file, ref or lane
+// could explain it. Auto mode never selected repo-wide items, so this only ever
+// fired when an operator named ids explicitly — the documented path.
+const isExclusive = (i) => i.scope === "repo-wide";
+
 const owners = new Map();
 for (const item of selected) {
+    if (isExclusive(item)) continue;
     for (const f of filesOf(item)) {
         if (owners.has(f)) union(owners.get(f), item.id);
         else owners.set(f, item.id);
@@ -134,11 +159,14 @@ for (const item of selected) {
 // than items, and those must not fabricate edges.
 const refEdges = [];
 for (const item of selected) {
-    if (!item.mapRef) continue;
+    if (!item.mapRef || isExclusive(item)) continue;
     for (const raw of String(item.mapRef).split(/[,\s]+/)) {
         const ref = raw.trim();
         if (!ref || ref === item.id) continue;
         if (!parent.has(ref)) continue;
+        // Same bridge as the file graph: a ref pointing AT a repo-wide item would
+        // union two otherwise-independent items through it.
+        if (isExclusive(byId.get(ref))) continue;
         if (find(ref) !== find(item.id)) refEdges.push([item.id, ref]);
         union(item.id, ref);
     }
@@ -147,9 +175,13 @@ for (const item of selected) {
 // Rule 2: configured lanes. Each lane collapses to ONE serial node regardless of
 // files, because the resource they contend for is not a file — it is a numbering
 // sequence, a lock, a singleton registry. A merge cannot resolve that collision.
+//
+// Exclusive items are excluded here too. A repo-wide item carrying a lane flag
+// would union every lane member through itself, and it is going to run alone in
+// its own wave regardless — which already satisfies the lane.
 const laneOf = new Map();
 for (const lane of cfg.lanes) {
-    const members = selected.filter((i) => i[lane.itemFlag]);
+    const members = selected.filter((i) => i[lane.itemFlag] && !isExclusive(i));
     if (members.length > 1) for (const m of members.slice(1)) union(members[0].id, m.id);
     for (const m of members) laneOf.set(m.id, lane);
 }
@@ -157,7 +189,7 @@ for (const lane of cfg.lanes) {
 // Rule 3: repo-wide items are exclusive and handled below, outside the groups.
 const groups = new Map();
 for (const item of selected) {
-    if (item.scope === "repo-wide") continue;
+    if (isExclusive(item)) continue;
     const root = find(item.id);
     if (!groups.has(root)) groups.set(root, []);
     groups.get(root).push(item);
@@ -179,11 +211,29 @@ function groupReason(members) {
     const refs = refEdges
         .filter(([a, b]) => ids.has(a) && ids.has(b))
         .map(([a, b]) => `${a} refs ${b}`);
-    return [
+    const reason = [
         lane ? `${lane.id} lane — ${lane.why}` : null,
         shared.length ? `shares ${shared.join(", ")}` : null,
         refs.length ? `declared same job — ${refs.join("; ")}` : null,
-    ].filter(Boolean).join("; ") || "grouped";
+    ].filter(Boolean).join("; ");
+
+    // THERE IS NO FALLBACK STRING. Every edge this partitioner can draw is one of
+    // the three above, so a group it cannot explain is a group joined by an edge
+    // nobody intended — which is precisely how the repo-wide bridge hid. It
+    // printed the old fallback `"grouped"` and read as a deliberate decision.
+    //
+    // Refusing here rather than printing a word costs a launch that fails in
+    // seconds having spent zero tokens. Printing the word costs a serial node
+    // whose file-ownership grant nobody can account for.
+    if (!reason) {
+        throw new Error(
+            `plan-batch: node ${members.map((m) => m.id).join(" + ")} was grouped, but no ` +
+            `shared file, declared cross-reference or lane explains it. That is a bug in ` +
+            `the partitioner, not in your queue — an edge was formed that nothing can name. ` +
+            `Do not dispatch this plan.`,
+        );
+    }
+    return reason;
 }
 
 const nodes = [];
@@ -202,7 +252,7 @@ for (const [, members] of groups) {
     });
 }
 
-for (const item of selected.filter((i) => i.scope === "repo-wide")) {
+for (const item of selected.filter(isExclusive)) {
     nodes.push({
         nodeId: item.id,
         items: [{
@@ -261,6 +311,44 @@ const plan = {
     harness: workflowSlice(cfg),
 };
 
+// ── is this even a graph? ────────────────────────────────────────────────────
+//
+// "When NOT to use this" was documented and never enforced, so the program would
+// happily emit a one-node batch and call it a diamond. That shape is not a
+// cheaper loop — it is the SAME loop plus a builder handoff and N verifiers, at
+// roughly 4x the tokens, and it reads as a graph in the report afterwards.
+//
+// Two different signals, and they deserve different force:
+//
+//   width < 2      there is no fan-out. Nothing is parallel with anything.
+//   dense node     one node carrying many items is one builder doing them in
+//                  series — the density trap working as designed, but the
+//                  operator should decide that knowingly rather than discover it
+//                  in the diff.
+//
+// --auto REFUSES a width-1 batch: auto mode is the machine proposing a batch, and
+// it must not propose a non-graph. Explicit ids only WARN — re-running one
+// rejected node through the verify lenses is a legitimate thing to ask for, and
+// refusing it would break a real workflow to enforce a style rule.
+const DENSE_NODE_ITEMS = 5;
+
+const advisories = [];
+if (plan.parallelWidth < 2) {
+    advisories.push(
+        `fan-out width is ${plan.parallelWidth} — THERE IS NO GRAPH HERE. Nothing in ` +
+        `wave 0 runs in parallel with anything else, so this batch costs one builder ` +
+        `plus ${cfg.verify.lenses.length} verifiers to do what the main loop does with one agent. ` +
+        `Run it in the main loop instead, unless you are deliberately re-verifying a node.`);
+}
+for (const n of nodes.filter((x) => x.items.length >= DENSE_NODE_ITEMS)) {
+    advisories.push(
+        `node ${n.nodeId} holds ${n.items.length} items — one builder will do all of ` +
+        `them serially in one context. There is no fan-out inside a node. If these ` +
+        `need to land in a particular ORDER, that is a wave or a smaller batch, not a ` +
+        `hope: the builder is told to pick the order that makes the smaller diff.`);
+}
+plan.advisories = advisories;
+
 // Cross-wave file overlaps are expected and SAFE (they are sequenced), but the
 // human reading this plan should still see them — a shared file across waves
 // means the second agent edits a file the first one just changed.
@@ -274,12 +362,28 @@ plan.crossWaveFiles = [...fileWaves.entries()]
     .map(([file, w]) => ({ file, waves: [...w].sort() }));
 
 // ── output ───────────────────────────────────────────────────────────────────
+// Auto mode is the MACHINE proposing a batch. A proposal that is not a graph is
+// the machine being wrong, so it exits non-zero rather than printing a plan the
+// operator has to know to reject. Explicit ids are a human decision and only warn.
+if (AUTO != null && plan.parallelWidth < 2) {
+    console.error(`error: --auto ${AUTO} could only find a batch of fan-out width ${plan.parallelWidth}.`);
+    for (const a of advisories) console.error(`  ${a}`);
+    console.error(
+        `\n  Raise --auto, widen the queue, or do this work in the main loop.\n` +
+        `  Naming the ids explicitly will still produce this plan if that is what you want.`);
+    process.exit(1);
+}
+
 if (JSON_OUT) {
     console.log(JSON.stringify(plan, null, 2));
 } else {
     console.log(`project        : ${cfg.project.name}`);
     console.log(`items selected : ${plan.itemCount}`);
     console.log(`nodes          : ${plan.nodeCount}  in ${waveCount} wave(s), fan-out width ${plan.parallelWidth}`);
+    if (advisories.length) {
+        console.log(`\nNOT A GRAPH (${advisories.length}) — read before spending agents on this:`);
+        for (const a of advisories) console.log(`  ! ${a}`);
+    }
     if (refused.length) {
         console.log(`\nREFUSED (${refused.length}) — not safe to dispatch:`);
         for (const r of plan.refused) console.log(`  [${r.scope}] ${r.id}\n      ${r.why}`);

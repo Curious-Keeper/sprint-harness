@@ -237,7 +237,9 @@ sections — this is the ~40 lines you actually write. Then run it **without**
   citing files. Go back to Phase 3.
 
 Then fill `{{REPO_INVARIANTS}}` in both agent contracts from Phase 4, and the
-`{{INTEGRATE}}` / `{{HUMAN GATE}}` blocks in `SKILL.md` from Phase 0.
+`{{HUMAN GATE}}` block in `SKILL.md` from Phase 0. Integration is no longer a
+block you fill: `core/integrate.sh` merges accepted nodes in wave order and runs
+the anchors on the merged tree from `harness.config.json`.
 
 **Commit the map.** Builders run in git worktrees, which materialize only
 *tracked* files. An uncommitted map means every builder plans from the previous

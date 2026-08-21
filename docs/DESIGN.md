@@ -154,16 +154,24 @@ by whoever got burned. It cannot be extracted.
 
 Honest list of what this kit does not yet do.
 
-- **`selftest.sh` covers everything except the graph itself.** 50 assertions over
-  config refusals, the partitioner (collisions, ref edges, lanes, exclusive
-  waves, refusals), the push guard, and the paired-artifact gate including the
-  waiver path that SIGPIPE once broke. What it does **not** cover is
-  `core/sprint-batch.mjs` end to end — that needs a live agent runtime, so it is
-  only parse-checked. The reduce logic in particular (outcome classification,
-  anchor disagreement) is pure and should be extracted and tested directly.
+- **The LENSES have never been shown to reject on this kit.** This is the big one.
+  `selftest.sh` covers 205 assertions and `core/reduce-fixture.mjs` proves the
+  reduce classifies bad input correctly, but neither shows a *verifier* detecting
+  anything. A lens that rubber-stamps everything emits `pass` verdicts the reduce
+  would happily call `accepted`. Proving detection needs a live batch containing a
+  deliberately broken node — wrong copy, an extra file, a failing invariant — and
+  that has not been run. Until one produces a reject, the verify half is an
+  architecture diagram. See SCARS.md #22.
+- **The graph is still not covered end to end.** `core/sprint-batch.mjs` needs a
+  live agent runtime. The reduce inside it is now sliced out by
+  `core/reduce-fixture.mjs` and mutation-tested, but the agent orchestration
+  around it is only parse-checked.
 - **`config.mjs` validates by hand rather than against the schema.** The JSON
   Schema is authoritative for editors; the loader re-checks the subset that would
-  cause a silent weakening. They can drift.
+  cause a silent weakening. `selftest.sh` now checks that every key the loader
+  defaults exists in the schema and that no shipped example uses a key the schema
+  forbids, which catches the drift that actually bit — but it is not full schema
+  validation, and there is no ajv dependency to do it with.
 - **The paired-artifact gate is bash + jq**, so it inherits bash's quoting model
   for `pairPath` templates. It handles the common cases; an exotic path with
   regex metacharacters in the *directory* portion is untested.

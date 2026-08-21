@@ -99,8 +99,11 @@ and we stop here.
 
 ## Task 5 — finish the skill and go green
 
-Fill `{{INTEGRATE}}` and `{{HUMAN GATE}}` in `.claude/skills/sprint/SKILL.md` with
-this project's real merged-tree anchor commands and verification path.
+Fill `{{HUMAN GATE}}` in `.claude/skills/sprint/SKILL.md` with this project's real
+verification path. Integration itself needs nothing filled in — `core/integrate.sh`
+reads the anchors from `harness.config.json`. If this project has generated files
+(an OpenAPI schema, generated clients, a bundled index), add them to `regenerate`
+now: no node's file list can name a generated file, so nothing else rebuilds it.
 
 Then:
 

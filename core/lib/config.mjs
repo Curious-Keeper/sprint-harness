@@ -51,7 +51,20 @@ const DEFAULTS = {
     project: { worktree: null, mainBranch: "main", remote: "origin" },
     map: null,
     queue: { path: ".claude/work/QUEUE.json", writeOnlyFrom: null },
+    // `fileExtensions: null` means "use DEFAULT_EXTENSIONS from core/lib/extract.mjs".
+    // Set it for a repo whose work is not application source — a content site
+    // needs md/mdx/svg/png, and without them its collisions are invisible.
+    extract: { fileExtensions: null },
     setup: [],
+    // Commands that REBUILD a generated file from its sources. integrate.sh runs
+    // them after merging a wave and before the merged-tree anchors.
+    //
+    // A generated file is the paired artifact of every file that feeds it, and
+    // no file list can name it: most edits to a source do not move it, so a
+    // pairedArtifacts rule demanding it on every node would be noise that gets
+    // waived by habit. It belongs here, once, at the point where the whole batch
+    // exists in one tree.
+    regenerate: [],
     lanes: [],
     pairedArtifacts: [],
     verify: { lenses: ["intent", "invariants", "anchors"], requireAllLenses: true },
@@ -124,6 +137,23 @@ function validate(cfg) {
         ids.add(a.id);
     }
 
+    const ext = cfg.extract?.fileExtensions;
+    if (ext != null) {
+        if (!Array.isArray(ext) || !ext.length) {
+            die("extract.fileExtensions must be a non-empty array, or absent to use the defaults");
+        }
+        for (const e of ext) {
+            if (typeof e !== "string" || !/^[A-Za-z][A-Za-z0-9]*$/.test(e)) {
+                die(`extract.fileExtensions: ${JSON.stringify(e)} is not a bare extension — ` +
+                    `write "md", not ".md" or "*.md"`);
+            }
+        }
+    }
+
+    for (const r of cfg.regenerate) {
+        if (!r?.cmd) die(`every regenerate entry needs a cmd (got ${JSON.stringify(r)})`);
+    }
+
     for (const l of cfg.lanes) {
         if (!l.id || !l.itemFlag || !l.why) die(`lane ${JSON.stringify(l.id ?? l)} needs id, itemFlag and why`);
     }
@@ -162,6 +192,9 @@ export function workflowSlice(cfg) {
         agents: cfg.agents,
         branchPrefix: cfg.branchPrefix,
         mainBranch: cfg.project.mainBranch,
+        // Where install.sh puts core/. The builder and the anchors lens both shell
+        // out to the scope gate, and a Workflow script cannot look it up.
+        scopeGate: ".claude/harness-core/scope-gate.sh",
         pairedArtifacts: cfg.pairedArtifacts.map((p) => ({ id: p.id, srcDir: p.srcDir })),
     };
 }

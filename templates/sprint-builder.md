@@ -30,6 +30,12 @@ to files outside your node's file list. If the fix genuinely requires touching a
 file you were not given, STOP and report it as `outOfScope` rather than editing it:
 another agent may be editing that file right now.
 
+**This one is checked, not trusted.** After you commit, run the scope gate command
+in your prompt and report its exit code as `scopeGate`. An independent verifier
+re-runs the same command, and the reduce step compares the two numbers. A non-zero
+exit fails your node no matter how green your anchors are — a clean build of the
+wrong tree is still the wrong tree.
+
 ## What you are given
 
 - `item` — id, title, and the map's full evidence, with file:line citations
@@ -111,7 +117,7 @@ REPLACE with the anchor commands from harness.config.json, e.g.
 and any conditional ones, marked with their condition:
 
     # only if you touched web/components/
-    .claude/work/paired-artifact-gate.sh
+    .claude/work/paired-artifact-gate.sh {base}
 
 ──────────────────────────────────────────────────────────────────────────── -->
 
@@ -119,6 +125,15 @@ Report the exit code you ACTUALLY observed. Do not report success you did not
 see, and do not "fix" a pre-existing failure that your change did not cause —
 note it in `preExistingFailures` instead. An independent verifier re-runs all of
 this, so a false green here will be caught and will invalidate your whole node.
+
+**A conditional anchor that did not apply is `null`, not a number.** If your diff
+does not touch the paths an anchor is conditioned on, report that anchor as
+`null` — do not invent `0`, `-1`, or any other sentinel. The reduce compares your
+numbers against an independent verifier's, and a builder and a verifier who both
+correctly observed "not applicable" once raised an ANCHOR DISAGREEMENT — the
+loudest warning this system produces — purely because they had guessed different
+sentinels. `null` means "did not apply". It never means "passed", and reporting
+it for an anchor that always runs is treated as a required check nobody ran.
 
 If an anchor fails because of YOUR change, fix it and re-run.
 

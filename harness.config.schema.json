@@ -8,6 +8,7 @@
     "additionalProperties": false,
     "properties": {
         "$schema": { "type": "string" },
+        "$comment": { "type": "string", "description": "Free-text note. Allowed so a config can explain itself without failing validation." },
 
         "project": {
             "type": "object",
@@ -55,6 +56,35 @@
             }
         },
 
+        "extract": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "How the extractor scrapes file paths out of map prose.",
+            "properties": {
+                "fileExtensions": {
+                    "type": ["array", "null"],
+                    "minItems": 1,
+                    "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*$" },
+                    "description": "THIS LIST IS THE PARTITIONER. Union-find is correct given its edges, and the edges come from scraping prose — so an extension missing here is a file the collision graph cannot see, and two items editing it get fanned out in parallel. The dangerous case is PARTIAL visibility: an item touching docs/guide.md and src/nav.ts scrapes the .ts, scores `bounded`, and hides the .md collision inside a confident node. Defaults to a typical application stack (ts/tsx/js/go/py/rs/sql/...). A content site, docs repo or design-asset repo MUST set its own list — md, mdx, svg, png, astro, vue. Bare extensions, no dot. The extractor reports any tracked file it found cited whose extension is not listed."
+                }
+            }
+        },
+
+        "regenerate": {
+            "type": "array",
+            "description": "Commands that REBUILD a generated file from its sources. core/integrate.sh runs them after merging a wave and after the scope gate, then commits any resulting diff before running the merged-tree anchors. A generated file is the paired artifact of EVERY file that feeds it and no node's file list can name it, so no node regenerates it and no anchor checks it — every anchor stays green while the committed artifact silently stops matching the source, and CI is the first thing that notices, after the merge. A pairedArtifacts rule is the wrong fix: most source edits do not move the generated file, so demanding it on every node is noise that gets waived by habit.",
+            "items": {
+                "type": "object",
+                "required": ["cmd"],
+                "additionalProperties": false,
+                "properties": {
+                    "cmd": { "type": "string" },
+                    "cwd": { "type": "string", "default": "." },
+                    "why": { "type": "string", "description": "Why this artifact drifts. Write it — the next reader needs to know which source edits move it." }
+                }
+            }
+        },
+
         "anchors": {
             "type": "array",
             "minItems": 1,
@@ -69,9 +99,16 @@
                         "pattern": "^[a-zA-Z][a-zA-Z0-9]*$",
                         "description": "Short identifier. Becomes a key in the builder/verifier structured output, so keep it a bare word."
                     },
-                    "cmd": { "type": "string" },
+                    "cmd": {
+                        "type": "string",
+                        "description": "May contain {base}, which resolves to THIS NODE'S base branch — the branch the builder started from, NOT project.mainBranch. Any gate that diffs against a ref needs it: under the stacking rule a batch's base is normally the newest unpushed branch, so judged against main every node inherits every earlier node's failures, and it gets worse the deeper the stack. That both manufactures false ANCHOR DISAGREEMENTs and, worse, stops the gate discriminating — once it is red from inherited failures, a node that genuinely skipped its own artifact cannot fail louder. An unknown placeholder throws before any agent spawns."
+                    },
                     "cwd": { "type": "string", "default": "." },
-                    "always": { "type": "boolean", "default": true },
+                    "always": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "false makes this anchor CONDITIONAL, which gives it a third state besides pass and fail. Both the builder and the verifier are told to report null when it did not apply, and the reduce skips any comparison where either side is null. A null on an always:true anchor is a required check nobody ran and is warned about."
+                    },
                     "whenTouches": {
                         "type": "array",
                         "items": { "type": "string" },

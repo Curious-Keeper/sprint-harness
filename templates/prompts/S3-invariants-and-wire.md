@@ -150,8 +150,10 @@ hole and we stop here.
 
 ## Task 7 — finish and go green
 
-Fill `{{INTEGRATE}}` and `{{HUMAN GATE}}` in `.claude/skills/sprint/SKILL.md` with
-this project's real merged-tree anchor commands and verification path.
+Fill `{{HUMAN GATE}}` in `.claude/skills/sprint/SKILL.md` with this project's
+real verification path. Integration needs nothing filled in — `core/integrate.sh`
+reads the anchors from `harness.config.json`. If this project has generated files,
+add them to `regenerate` now: no node's file list can name a generated file.
 
 ```bash
 .claude/harness-core/preflight.sh
