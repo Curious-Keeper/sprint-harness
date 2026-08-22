@@ -1105,3 +1105,161 @@ the FILE LIST was what was wrong. Correcting a list and merging on the standing
 verdicts is not the same as a fresh lens judging the corrected node. What is
 trusted in those cases is anchors and a watched failure, not a second opinion.
 Stated here rather than left to be inferred.
+
+---
+
+## 32. A lane serialised a resource it never granted
+
+**What happened.** `lanes[]` exists so two agents cannot both mint the next
+migration number — a resource no merge can reconcile. It worked: the item was
+folded into a single serial node labelled `migration lane`. But the node's
+declared `files` contained no `migrations/` path, and `scope-gate.sh` is a set
+difference against `files ∪ newFiles`.
+
+So the builder had nowhere legal to write the SQL. Its two moves were to commit a
+scope violation, or to build the UI half against a column that does not exist —
+a cell that renders as a confidently empty date. It did neither: it refused the
+item, reported the missing path, and shipped the other two items in its node.
+The reduce then marked the node `not-built`.
+
+**The lane's two halves were built years apart in practice.** Serialisation is
+enforced at partition time and was exercised constantly. The GRANT was never
+exercised at all, because on the source project every migration predated the
+harness — ten of them, all hand-written. The first migration item ever
+dispatched found the hole immediately.
+
+**Why nothing caught it earlier.** A lane item looks *more* protected than an
+ordinary one, not less: it gets its own node, an explicit `reason` string naming
+the lane, and a scope gate. Every one of those fired correctly. The thing that
+did not exist was never mentioned by anything that did.
+
+**This is scar #29 in a second costume.** There, `pairedArtifacts` COMPELLED a
+file no list GRANTED. Here a lane SERIALISES a resource no list GRANTS. The
+shape is identical — *the harness demands an artifact, and the file list is
+derived from citations that cannot mention it* — and #29's closing lesson
+applies unchanged: **a scope reject is not automatically a builder error.** Read
+whether the builder, the lens, or the LIST is wrong.
+
+**The fix, in the same spirit as #29's companions.** A lane that names a resource
+should be able to say what path that resource occupies, so the grant is DERIVED
+from the same declaration that causes the serialisation rather than restated per
+item:
+
+```jsonc
+"lanes": [{
+    "id": "migration",
+    "itemFlag": "needsNewMigration",
+    "grantPattern": "supabase/migrations/{next}_{slug}.sql"
+}]
+```
+
+Until that exists, the per-item escape is an `OVERRIDES.newFiles` entry pinning
+the exact filename — the gate is an exact string match, and a lane guarantees at
+most one such item per batch, so the number is deterministic.
+
+**The cheap interim guard, and it is worth more than it costs.** `plan-batch.mjs`
+already REFUSES `unscoped` items. It should equally refuse — or at minimum
+advise on — a node in a resource lane whose file set contains nothing matching
+that lane. That converts a silently unbuildable node, discovered after a builder
+and three verifiers have run, into a planning-time error costing zero agents.
+
+**Where it lives.** Not in `core/` yet. The interim grant is an
+`OVERRIDES.newFiles` entry in the consuming project's `extract-queue.mjs`.
+
+---
+
+## 33. The generated-file fix can generate the wrong file
+
+**What happened.** Scar #30 added `regenerate` to config, run by `integrate.sh`
+after a wave merges and before the merged-tree anchors. It is the right
+mechanism. Applying it to a *migration*-generated artifact needs one more
+condition that #30 did not need, and getting it wrong is silent.
+
+The source project's type generator reads a **running Postgres** and emits the
+schema as it currently stands. At integrate time the merged tree contains the new
+migration, but the database still does not — migrations are applied later, by the
+deploy step. So `regenerate` would faithfully write the types of the OLD schema,
+commit them beside a migration that adds a column, and report success.
+
+**That is scar #30's exact failure — a committed artifact that no longer matches
+the app — reproduced by scar #30's own fix.** It would also survive the guard
+that fix installed, because the merged-tree anchors run after regeneration and a
+stale-but-valid types file type-checks perfectly.
+
+**Worse, the generator's own safety check passes.** It refuses to overwrite if
+the output is missing known tables — a guard against connecting to an empty
+database. Every one of those tables exists in the old schema, so the check waves
+through a file that is wrong in exactly the way the check cannot see.
+
+**The condition.** A `regenerate` entry whose source of truth is the DATABASE,
+not the source tree, is only correct if the command APPLIES PENDING MIGRATIONS
+FIRST — and it must do that against a scratch or ephemeral database, never a
+shared one. On a shared mirror, applying a migration during integrate would leak
+one node's schema change into every other worktree reading that database, and a
+subsequently rejected node would leave the mirror carrying a migration no branch
+ever shipped.
+
+**The general rule.** For each `regenerate` entry, ask what it READS. If it reads
+the source tree, merging is enough and #30 covers it. If it reads a live service,
+merging is NOT enough: the service has to be brought to the merged tree's state
+first, in isolation, or the entry must not exist and the regeneration is a
+post-deploy step recorded as owed work.
+
+**And say so out loud when it is deferred**, because nothing goes red either way:
+if the surface reading the new column is hand-typed or cast, the type-checker
+passes with a stale generated file, so the omission has no symptom until someone
+trusts the file. A stale generated file is worse than none — it type-checks
+confidently against a schema that no longer exists.
+
+**Where it lives.** Not in `core/` yet. Today it is a warning in the consuming
+project's item prose and a deliberately withheld grant.
+
+---
+
+## 34. A node id contains spaces, so serial nodes never merged
+
+**What happened.** `integrate.sh` picked the nodes to merge with
+
+```bash
+for nodeId in $(printf '%s\n' "$IN_WAVE"); do
+    printf '%s\n' "$ACCEPTED" | grep -qxF "$nodeId" || continue
+```
+
+A node's id is its item list joined with `" + "` whenever the partitioner folds
+colliding items into a collision group. So the id **contains spaces**, word
+splitting turned one id into five tokens — `cb:a`, `+`, `cb:b`, `+`, `cb:c` — and
+none of them matched the accepted list. The node was skipped.
+
+**It failed silently, and that is the serious part.** No error, no warning. The run
+ended `dry run: 0 node(s) would merge across 1 wave(s)`, which reads as
+*nothing to do* rather than as a failure. It was caught only because an accepted
+node was known to exist and the count was questioned.
+
+**What it affected: exactly the nodes that matter.** A batch whose items are all
+independent has single-item ids with no spaces, and merged perfectly. Only SERIAL
+nodes broke — which is to say, precisely the collision groups the partitioner
+exists to build. The easy case worked, the load-bearing case did not, and that
+asymmetry is why it survived so long.
+
+**The fix.**
+
+```bash
+while IFS= read -r nodeId; do … done <<< "$IN_WAVE"
+```
+
+**A herestring, not a pipe**, and that part is not cosmetic: `printf … | while`
+runs the body in a SUBSHELL, so the `WAVE_MERGED` / `MERGED` counters would be
+discarded when the loop ends — replacing a silent skip with a silent miscount.
+
+**The detail worth sitting with: the correct idiom was already in the same file,
+70 lines above**, listing the not-accepted nodes. The pattern was known and one
+loop was missed. A convention that lives only in the author's head gets applied
+unevenly; the same is true of #4's herestring rule, which this is a second
+instance of.
+
+**The general lesson. Any identifier assembled by JOINING other identifiers stops
+being shell-safe**, and nothing about the code at the joining site says so. If an
+id can be composite, it must be read line-wise from the moment it is created —
+`for … in $(…)` over ids is the bug, not the escaping.
+
+**Where it lives.** The `while IFS= read -r nodeId` loop in `core/integrate.sh`.

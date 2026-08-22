@@ -59,6 +59,7 @@
         "extract": {
             "type": "object",
             "additionalProperties": false,
+            "$comment": { "type": "string", "description": "Free-text note. Allowed so a config can explain itself in place, next to the value it is about, without failing validation." },
             "description": "How the extractor scrapes file paths out of map prose.",
             "properties": {
                 "fileExtensions": {
@@ -77,6 +78,8 @@
                 "type": "object",
                 "required": ["cmd"],
                 "additionalProperties": false,
+                "$comment": { "type": "string", "description": "Free-text note. Allowed so a config can explain itself in place, next to the value it is about, without failing validation." },
+                "$comment": { "type": "string", "description": "Free-text note. Allowed so a config can explain itself in place, next to the value it is about, without failing validation." },
                 "properties": {
                     "cmd": { "type": "string" },
                     "cwd": { "type": "string", "default": "." },
@@ -125,6 +128,7 @@
                 "type": "object",
                 "required": ["cmd"],
                 "additionalProperties": false,
+                "$comment": { "type": "string", "description": "Free-text note. Allowed so a config can explain itself in place, next to the value it is about, without failing validation." },
                 "properties": {
                     "cmd": { "type": "string" },
                     "cwd": { "type": "string", "default": "." },
@@ -161,6 +165,7 @@
                 "type": "object",
                 "required": ["id", "srcDir", "srcExt", "pairPath"],
                 "additionalProperties": false,
+                "$comment": { "type": "string", "description": "Free-text note. Allowed so a config can explain itself in place, next to the value it is about, without failing validation." },
                 "properties": {
                     "id": { "type": "string" },
                     "srcDir": { "type": "string" },

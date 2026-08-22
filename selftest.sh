@@ -235,6 +235,30 @@ dcheck "a dot-directory inside prose still matches" \
     '.midSentence|join(",")' ".circleci/config.yml"
 dcheck "the path is not ALSO matched one char in" '.noDoubleMatch' 1
 
+# PROSE PUNCTUATION vs A REAL BRACKET. PATH_BODY admits ( and [ because real
+# paths contain them (Next.js route groups, dynamic segments), and LEFT_EDGE lets
+# a match START on one — required for a dot-directory. Ordinary prose then gets
+# glued on: "no overflow container (carriers/[id]/page.tsx" captured the paren
+# and suffix-matched nothing, dropping the citation. Same silent edge loss the
+# dot-directory fix above exists to prevent, reached through that very fix.
+# Found 2026-08-21 on allrail-ops-next, on the first run after installing it.
+par_out=$(node --input-type=module -e '
+import { citedFiles, buildResolver }
+    from "'"$REPO"'/.claude/harness-core/lib/extract.mjs";
+const tracked = ["web/app/(app)/carriers/[id]/page.tsx", "web/app/(app)/orders/page.tsx", "src/a.ts"];
+const r = buildResolver(tracked);
+console.log(JSON.stringify({
+    parenProse: citedFiles("no overflow container (carriers/[id]/page.tsx, two tables)", r).files,
+    routeGroup: citedFiles("the list lives at (app)/orders/page.tsx today", r).files,
+    stillDrops: citedFiles("nothing here", r).files.length,
+}));' 2>&1)
+pcheck() { local got; got=$(jq -r "$2" <<< "$par_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pcheck "a paren from PROSE is trimmed off the path" \
+    '.parenProse|join(",")' "web/app/(app)/carriers/[id]/page.tsx"
+pcheck "...but a route group the path CLOSES is kept whole" \
+    '.routeGroup|join(",")' "web/app/(app)/orders/page.tsx"
+
 cat > "$TMP/badext.json" <<'JSON'
 { "project": { "name": "x", "mainBranch": "main" }, "queue": { "path": "q.json" },
   "anchors": [ { "id": "t", "cmd": "true" } ],
@@ -629,6 +653,78 @@ else
     [ $? -eq 2 ] && ok "reduce fixture REFUSES a file whose markers moved" \
                  || no "reduce fixture REFUSES a file whose markers moved"
 fi
+
+# ── prebuilt nodes: re-judge, and the canary ─────────────────────────────────
+#
+# A node carrying `prebuilt` skips the builder and is verified as-is. This runs
+# the SHIPPED graph with stubbed agent/pipeline/parallel — the real dispatch and
+# the real reduce, zero agents — and asserts the builder is not called while
+# every lens still is.
+#
+# It matters because of what the rest of this file CANNOT prove: the reduce
+# fixture shows bad input is classified correctly, not that any verifier detects
+# anything. A run where every node is accepted is consistent with three working
+# lenses and equally consistent with three that are not looking. Planting a known
+# defect and watching for the reject is the only thing that separates them, and
+# it is impossible without a way to verify a branch a builder did not just write.
+echo
+echo "── prebuilt / canary ──"
+cat > "$TMP/prebuilt.mjs" <<'MJS'
+import { readFileSync } from "node:fs";
+const src = readFileSync(process.argv[2], "utf8").replace(/^export const meta/m, "const meta");
+const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+const calls = [];
+const agent = async (prompt, opts) => {
+    calls.push(opts.label);
+    if (opts.label.startsWith("verify:")) {
+        return { lens: opts.label.split(":")[1], verdict: "reject", evidence: ["planted defect found"],
+                 confidence: "high", observedAnchors: { tsc: 0, lint: 0, test: 1 }, observedScopeGate: 0 };
+    }
+    return { status: "done", branch: "b", commit: "abc1234", filesChanged: ["web/a.tsx"],
+             anchors: { tsc: 0, lint: 0, test: 0 }, summary: "built", scopeGate: 0 };
+};
+const parallel = (t) => Promise.all(t.map((f) => f()));
+const pipeline = async (items, ...stages) => {
+    const out = [];
+    for (const [i, item] of items.entries()) { let v = item;
+        for (const s of stages) v = await s(v, item, i); out.push(v); }
+    return out;
+};
+const harness = {
+    anchors: ["tsc", "lint", "test"].map((id) => ({ id, cmd: id, cwd: ".", always: true, whenTouches: null })),
+    setup: [{ cmd: "npm ci", cwd: ".", why: null }],
+    lenses: ["intent", "invariants", "anchors"], requireAllLenses: true,
+    agents: { builder: "sprint-builder", verifier: "sprint-verifier" },
+    branchPrefix: "sprint", mainBranch: "main",
+    scopeGate: ".claude/harness-core/scope-gate.sh", pairedArtifacts: [],
+};
+const node = (id, extra = {}) => ({ nodeId: id, wave: 0, reason: "r", serial: false, files: ["web/a.tsx"],
+    items: [{ id: "x1", title: "t", source: "s", severity: "high", files: ["web/a.tsx"], newFiles: [], detail: "d" }], ...extra });
+const plan = { baseBranch: "base", batchName: "canary", wave: 0, harness, nodes: [
+    node("normal"),
+    node("planted", { prebuilt: { status: "done", branch: "canary/planted", commit: "deadbee",
+        filesChanged: ["web/a.tsx"], anchors: { tsc: 0, lint: 0, test: 0 }, summary: "claims green", scopeGate: 0 } }),
+]};
+const report = await new AsyncFn("args", "log", "agent", "pipeline", "parallel", src)(plan, () => {}, agent, pipeline, parallel);
+const p = report.nodes.find((n) => n.nodeId === "planted");
+console.log(JSON.stringify({
+    builds: calls.filter((c) => c.startsWith("build:")).join(","),
+    lenses: calls.filter((c) => c.startsWith("verify:") && c.endsWith(":planted")).length,
+    outcome: p?.outcome,
+    claimed: p?.claimedAnchors?.test,
+    disagreements: (report.warnings ?? []).filter((w) => /ANCHOR DISAGREEMENT/.test(w)).length,
+}));
+MJS
+pb_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" 2>&1)
+pbcheck() { local got; got=$(jq -r "$2" <<< "$pb_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pbcheck "a prebuilt node does NOT dispatch a builder" '.builds' "build:normal"
+pbcheck "...and is still judged by every lens" '.lenses' 3
+pbcheck "a planted defect comes back REJECTED" '.outcome' "rejected"
+# The claimed anchors must survive UNVALIDATED, or a canary cannot claim a green
+# it did not earn and the claimed-vs-observed check has nothing to catch.
+pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0
+pbcheck "...so the claimed-vs-observed disagreement still fires" '.disagreements' 2
 
 # ── integrate ────────────────────────────────────────────────────────────────
 #
@@ -1047,6 +1143,25 @@ grep -q "on the stacking base 'feat/unpushed'" <<< "$stk_on_base" \
 [ "$stk_on_base_rc" -eq 0 ] \
     && ok "preflight EXITS 0 when standing on the stacking base" \
     || no "preflight EXITS 0 when standing on the stacking base (got $stk_on_base_rc)"
+
+# A FRESHLY CUT branch points at the same commit as the base it came from, and
+# `git log -1 --format=%ct` is identical for both — so which one sorts first is
+# arbitrary. A name-only comparison reports the correct base as "not the newest"
+# and goes red on a tree that is in exactly the right state: scar #17 again, one
+# step later. Standing on either is equivalent for what the NEXT commit is based
+# on, so both must be green.
+git -C "$STK" checkout -q -b chore/next feat/unpushed
+stk_fresh=$(cd "$STK" && SPRINT_HARNESS_CONFIG="$TMP/stk-default.json" \
+    ./.claude/harness-core/preflight.sh 2>&1)
+stk_fresh_rc=$?
+! grep -q "UNPUSHED WORK EXISTS" <<< "$stk_fresh" \
+    && ok "preflight is GREEN on a branch cut from the stacking base (same commit)" \
+    || no "preflight is GREEN on a branch cut from the stacking base (same commit)"
+[ "$stk_fresh_rc" -eq 0 ] \
+    && ok "preflight EXITS 0 on a same-commit stacking base" \
+    || no "preflight EXITS 0 on a same-commit stacking base (got $stk_fresh_rc)"
+git -C "$STK" checkout -q feat/unpushed
+git -C "$STK" branch -qD chore/next
 
 # An OLDER unpushed branch is still the wrong base: building there means the
 # newest unpushed work is not in your tree, which is scar #6 by another route.

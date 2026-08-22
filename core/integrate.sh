@@ -110,6 +110,18 @@ run_anchors() {
         id=$(jq -r ".anchors[$k].id" "$CFG")
         cmd=$(jq -r ".anchors[$k].cmd" "$CFG")
         cwd=$(jq -r ".anchors[$k].cwd // \".\"" "$CFG")
+        # SUBSTITUTE {base} — sprint-batch.mjs does this for a node's own base and
+        # this runner did not, so an anchor carrying the placeholder was handed the
+        # LITERAL string "{base}" as a ref and exited 2 with "base ref '{base}' does
+        # not exist". That is a FALSE RED on the merged tree, and it fires the
+        # loudest message this script has ("RED ANCHORS … Do not push"), over a
+        # placeholder. Same shape as the serial-node bug: the rule existed, one site
+        # was missed.
+        #
+        # $BASE_SHA is the right ref here, and it is why it is pinned before any
+        # merge lands: it is where the batch STARTED, so a diffing gate sees exactly
+        # what this wave changed rather than the merged tree against itself.
+        cmd=${cmd//\{base\}/$BASE_SHA}
         out=$( cd "$ROOT/$cwd" && eval "$cmd" 2>&1 ); code=$?
         if [ $code -eq 0 ]; then
             echo "    ✓ $id (exit 0)"
@@ -151,7 +163,19 @@ for w in $WAVES; do
     IN_WAVE=$(jq -r --argjson w "$w" '[.nodes[]|select(.wave==$w)|.nodeId]|.[]' "$PLAN")
     WAVE_MERGED=0
 
-    for nodeId in $(printf '%s\n' "$IN_WAVE"); do
+    # READ LINE BY LINE, NOT `for … in $(…)`. A node's id is its ITEM LIST joined
+    # with " + " for any collision group, so it CONTAINS SPACES — and word splitting
+    # turned one id into five tokens ("cb:a", "+", "cb:b", "+", "cb:c"), none of
+    # which matched the accepted list. Every SERIAL node therefore failed to merge,
+    # and failed SILENTLY: the run ended "0 node(s) would merge", which reads as
+    # nothing-to-do rather than as an error. Serial nodes are exactly the collision
+    # groups the partitioner exists to build, so this hit the batches that need it
+    # most while leaving all-independent batches working perfectly.
+    #
+    # A herestring, not a pipe: `printf … | while` runs the body in a SUBSHELL, and
+    # the merge counters below would be discarded at the end of the loop.
+    while IFS= read -r nodeId; do
+        [ -n "$nodeId" ] || continue
         printf '%s\n' "$ACCEPTED" | grep -qxF "$nodeId" || continue
         branch=$(jq -r --arg n "$nodeId" '.nodes[]|select(.nodeId==$n)|.branch' "$REPORT")
         if [ -z "$branch" ] || [ "$branch" = "null" ]; then
@@ -187,7 +211,7 @@ for w in $WAVES; do
         fi
         echo "  merged"
         WAVE_MERGED=$((WAVE_MERGED + 1)); MERGED=$((MERGED + 1))
-    done
+    done <<< "$IN_WAVE"
 
     [ "$WAVE_MERGED" -eq 0 ] && continue
     [ $DRY_RUN -eq 1 ] && continue

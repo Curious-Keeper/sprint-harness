@@ -144,6 +144,35 @@ const NOT_FILES = new Set([
     "e", "g", "etc", "eg", "ie", "js", // "e.g", "i.e", "Node.js", "vs.js"
 ]);
 
+// Strip a leading bracket that the token never closes.
+//
+// PATH_BODY admits `(` and `[` because real paths contain them — Next.js route
+// groups (`app/(app)/page.tsx`) and dynamic segments (`[id]`). LEFT_EDGE then
+// admits a match that STARTS on one, which is required for a dot-directory but
+// also lets ordinary prose punctuation in:
+//
+//     "two tables with no overflow container (carriers/[id]/page.tsx, ...)"
+//
+// captures `(carriers/[id]/page.tsx`, which suffix-matches nothing and drops the
+// citation from the collision graph — scar #26's own failure reached through
+// scar #26's fix, and just as silent.
+//
+// Balance is the discriminator: `(app)/x.tsx` closes its bracket and is kept
+// whole, `(carriers/[id]/page.tsx` does not and loses the leading `(`. Only
+// LEADING brackets are considered; the trailing `)` is already excluded by the
+// `\b` at the end of the pattern.
+function trimUnbalanced(token) {
+    let t = token;
+    while (t.length > 1 && (t[0] === "(" || t[0] === "[")) {
+        const close = t[0] === "(" ? ")" : "]";
+        const opens = t.split(t[0]).length - 1;
+        const closes = t.split(close).length - 1;
+        if (opens <= closes) break;
+        t = t.slice(1);
+    }
+    return t;
+}
+
 export function citedFiles(text, resolve, { extensions = DEFAULT_EXTENSIONS } = {}) {
     const out = new Set();
     const problems = [];
@@ -152,16 +181,19 @@ export function citedFiles(text, resolve, { extensions = DEFAULT_EXTENSIONS } = 
 
     const seen = new Set();
     for (const m of src.matchAll(fileRe(extensions))) {
+        const cited = trimUnbalanced(m[1]);
         seen.add(m[1]);
-        const r = resolve(m[1], src);
+        seen.add(cited);
+        const r = resolve(cited, src);
         if (r.path) out.add(r.path);
         else problems.push(r);
     }
 
     // The linter half: a path-shaped token whose extension is not configured.
     for (const m of src.matchAll(ANY_PATH_RE)) {
-        const [, cited, ext] = m;
-        if (seen.has(cited)) continue;
+        const [, raw, ext] = m;
+        const cited = trimUnbalanced(raw);
+        if (seen.has(raw) || seen.has(cited)) continue;
         const e = ext.toLowerCase();
         if (known.has(e) || NOT_FILES.has(e)) continue;
         // Only complain if it is actually a file in this repo. A prose mention of
