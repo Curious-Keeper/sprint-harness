@@ -116,6 +116,11 @@
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Run this anchor only when the diff touches one of these paths/prefixes. Keeps a slow anchor off nodes that cannot have broken it."
+                    },
+                    "serialize": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Hold a host-wide lock while this anchor runs, so only one copy executes on the box at a time. Set it on any anchor that sizes its own worker pool to the core count -- a test runner, typically. A wave starts an anchor up to 2N times at once (one builder plus one anchors verifier per node), which oversubscribes the machine N-fold and turns timeouts into red exit codes that look like code failures. Measured: 8 concurrent runs of a suite that is green alone came back 8/8 red, 200 failures, every one a timeout and not one an assertion. Costs wall-clock; buys a number the builder and the verifier can both stand behind. See docs/SCARS.md #35."
                     }
                 }
             }

@@ -104,6 +104,25 @@ a set difference between the paths the branch changed and the paths the node
 declared. Your number outranks the builder's — the reduce compares the two, and a
 disagreement is reported the same way an anchor disagreement is.
 
+⛔ **NEVER WRITE AN ANCHOR LOG TO A PATH A SIBLING COULD ALSO WRITE.** Every node
+in a wave runs at the same time and is handed the SAME session scratchpad
+directory, so a plain `<cmd> > scratchpad/test.log` is a race between you and up
+to N-1 other agents — and the loser reads a file written by someone else.
+
+This is not hypothetical. On 2026-09-02 a verifier's log was overwritten by
+another node's run and reported five failures that belonged to a different
+branch; it caught the swap only because the runner's own header happened to name
+the other worktree in the output. Nothing else would have shown it, and the
+verdict would have been a REJECT of a node whose diff was fine.
+
+Either keep the log inside YOUR OWN worktree, or put your node id in the
+filename:
+
+    <cmd> > "$SCRATCHPAD/<node-id>-test.log" 2>&1; echo "test=$?"
+
+A shared temp path is the one place where "it worked when I ran it" and "it
+worked" come apart silently.
+
 Report the exit codes you OBSERVED. "It should pass" is not an answer to this
 lens; only an exit code is — with one exception: an anchor whose condition the
 diff does not meet is `null`, not a number. Do not translate "the gate ran and

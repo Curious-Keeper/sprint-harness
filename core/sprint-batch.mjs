@@ -217,9 +217,51 @@ const resolveAnchorCmd = (a) => a.cmd.replace(/(?<!\$)\{(\w+)\}/g, (whole, key) 
     return resolve();
 });
 
+// ── serialised anchors ───────────────────────────────────────────────────────
+//
+// An anchor with `serialize: true` is wrapped in a host-wide lock, so only one
+// copy of it runs on the box at a time no matter how wide the fan-out is.
+//
+// This exists because a wave starts a heavyweight suite up to 2N times at once —
+// one builder and one `anchors` verifier per node — and most runners size their
+// worker pool to the core count, so N concurrent runs oversubscribe the machine
+// N-fold. Measured on a 12-core box, 2026-09-02: eight concurrent `npm test` runs
+// against a tree that is 972/972 green ALONE came back 8/8 red, and all 200
+// failures were `Test timed out in 5000ms`. Not one assertion failed.
+//
+// The damage is not the wasted time. It is that the anchor answers a question
+// about machine load while presenting as a question about the code, so a builder
+// and its verifier can honestly disagree at random — manufacturing the ANCHOR
+// DISAGREEMENT that is supposed to be this harness's loudest and rarest signal.
+// See SCARS.md #35.
+//
+// The lock is advisory, host-wide and keyed by name, so every worktree queues on
+// the same one. That IS the point: they share the CPU, not the checkout.
+const cwdHop = (cwd) => {
+    const clean = (cwd ?? '.').replace(/^\.\/+/, '').replace(/\/+$/, '');
+    if (clean === '' || clean === '.') return './';
+    return clean.split('/').map(() => '..').join('/') + '/';
+};
+
+const serialised = (a, cmd) => {
+    if (a.serialize !== true) return cmd;
+    if (!H.serializer) {
+        // Throw rather than silently drop the lock. A plan built by an older
+        // plan-batch carries `serialize: true` with nowhere to send it, and an
+        // anchor that quietly stops being serialised looks exactly like one that
+        // never needed to be — until the next wide wave goes red at random.
+        throw new Error(
+            `sprint-batch: anchor ${JSON.stringify(a.id)} sets serialize:true but the ` +
+            `plan carries no harness.serializer path. Re-run plan-batch.mjs --json ` +
+            `with a current core/lib/config.mjs.`,
+        );
+    }
+    return `${cwdHop(a.cwd)}${H.serializer} ${a.id} ${cmd}`;
+};
+
 // Eager, so a bad placeholder throws before the first agent spawns rather than
 // inside the prompt builder of whichever node happens to render first.
-const ANCHOR_CMDS = new Map(H.anchors.map((a) => [a.id, resolveAnchorCmd(a)]));
+const ANCHOR_CMDS = new Map(H.anchors.map((a) => [a.id, serialised(a, resolveAnchorCmd(a))]));
 
 const anchorLines = (indent = '    ') => H.anchors.map((a) => {
     const where = a.cwd && a.cwd !== '.' ? `  (from ${a.cwd}/)` : '';
