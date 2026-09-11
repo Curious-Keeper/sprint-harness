@@ -146,7 +146,33 @@ const VERDICT_SCHEMA = {
             description: 'One short bullet per thing you checked. No newlines inside an item.',
         },
         confidence: { ...SHORT, description: 'One sentence: how sure, and what would change your mind.' },
-        couldNotVerify: { type: 'array', items: SHORT, maxItems: 6 },
+        couldNotVerify: {
+            type: 'array', items: SHORT, maxItems: 6,
+            description: 'Questions YOUR OWN lens asks that you could not answer. Not defects you saw elsewhere.',
+        },
+        // A defect this lens SAW but does not OWN — scar #37.
+        //
+        // `couldNotVerify` is the wrong home for it and was used as one: a
+        // verifier wrote "for another lens, not mine: <a real defect>" into that
+        // array, the lens that owned the question passed, and the node merged
+        // green. Nothing was broken, because nothing was ever wired up — the
+        // reduce collects `couldNotVerify` into the report and computes
+        // `accepted` without it.
+        //
+        // Free text cannot be routed. A NAMED lens can, and naming one here
+        // contests its verdict: see the CONTESTED LENS rule in the reduce.
+        crossLens: {
+            type: 'array', maxItems: 3,
+            items: {
+                type: 'object',
+                required: ['lens', 'concern'],
+                properties: {
+                    lens: { enum: LENSES, description: 'The lens that OWNS this question. Not yours.' },
+                    concern: { ...SHORT, description: 'What you saw, specifically. One sentence.' },
+                },
+            },
+            description: 'Defects outside your lens. Naming a lens here CONTESTS its verdict, so be specific.',
+        },
         testGap: { ...SHORT, maxLength: 400 },
         observedAnchors: {
             type: 'object',
@@ -576,8 +602,25 @@ const report = returned.map((r) => {
     const scopeGate = observedGate ?? r.build?.scopeGate ?? null;
     const scopeClean = scopeGate === 0;
 
+    // CONTESTED LENS — scar #37. A verifier may name a defect in another lens's
+    // territory via `crossLens`. That only becomes load-bearing when the lens it
+    // NAMES passed: one agent looked at that territory and saw a defect, another
+    // looked at the same territory and called it clean. Both cannot be right,
+    // and the node must not merge on the word of the one that looked away.
+    //
+    // Deliberately NOT a rejection. Nobody holding the named lens made a
+    // finding, so calling this `rejected` invents one — scar #2. It is a
+    // question nobody answered with the lens that owns it, which is exactly
+    // what `unverified` means everywhere else in this function.
+    //
+    // A lens naming ITSELF is not special-cased: a verdict that passes while
+    // its own author writes down a defect is contested by the same argument.
+    const crossLens = verdicts.flatMap((v) =>
+        (v.crossLens ?? []).map((c) => ({ from: v.lens, lens: c.lens, concern: c.concern })));
+    const contested = crossLens.filter((c) => passes.some((v) => v.lens === c.lens));
+
     const accepted = r.build?.status === 'done' && allLensesRan
-        && rejects.length === 0 && scopeClean;
+        && rejects.length === 0 && scopeClean && contested.length === 0;
 
     // "Rejected" and "unverified" are DIFFERENT outcomes and must never be
     // collapsed. A node whose verifier crashed has not been judged; reporting it
@@ -619,6 +662,8 @@ const report = returned.map((r) => {
         staleEvidence: r.build?.staleEvidence ?? [],
         testGaps: verdicts.map((v) => v.testGap).filter(Boolean),
         couldNotVerify: verdicts.flatMap((v) => v.couldNotVerify ?? []),
+        crossLens,
+        contested,
         skipped: r.skipped ?? null,
         summary: r.build?.summary ?? null,
     };
@@ -632,6 +677,29 @@ if (lost > 0) {
         `DO NOT treat this batch as complete.`);
 }
 for (const r of report) {
+    // A contested lens is two agents disagreeing about the SAME territory, and
+    // it names both so the operator can re-run the one that owns it rather than
+    // re-running the whole node.
+    for (const c of r.contested) {
+        warnings.push(
+            `${r.nodeId}: CONTESTED LENS — the ${c.from} verifier reports a defect that ${c.lens} ` +
+            `owns, and ${c.lens} passed: "${c.concern}". One of the two looked away. This is ` +
+            `UNVERIFIED, not rejected — re-run the ${c.lens} lens with that concern in hand.`);
+    }
+    // ...and the same field on a node nobody contested is still worth a line,
+    // because `accepted` has never meant "everything was checked".
+    //
+    // It does NOT block. `couldNotVerify` is scoped by the prompt to questions a
+    // lens asks about its OWN territory, and an honest "could not reach this" is
+    // the behaviour the prompt asks for. Failing the node for it would fire on
+    // the state the prompt recommends, which is scar #17 — the operator learns
+    // to read past the warning, and a real one then arrives looking identical.
+    if (r.outcome === 'accepted' && r.couldNotVerify.length) {
+        warnings.push(
+            `${r.nodeId}: accepted with ${r.couldNotVerify.length} unanswered question(s) — see ` +
+            `couldNotVerify on this node. Accepted means no lens rejected it, not that every ` +
+            `question was answered.`);
+    }
     // Only when lenses are actually missing. A node can now be `unverified`
     // because nobody reported the scope gate even though all three lenses ran,
     // and printing "missing []" at the operator sends them looking for a dead

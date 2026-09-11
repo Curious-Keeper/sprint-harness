@@ -255,5 +255,81 @@ const hasWarning = (r, re) => r.warnings.some((w) => new RegExp(re).test(w));
     t("...and says absence is not success", hasWarning(r, "not a check that passed"), true);
 }
 
+// CANARY: one lens saw a defect that another lens OWNS, and that lens passed.
+// Scar #37 — every lens returned, every anchor was green, and the signal was
+// sitting in the run while the node merged.
+{
+    const n = node("contested");
+    const verdicts = [
+        verdict("intent"), verdict("invariants"),
+        verdict("anchors", { crossLens: [{ lens: "invariants", concern: "the boundary moved" }] }),
+    ];
+    const r = run([{ node: n, build: build(), verdicts }]);
+    t("a contested lens is NOT accepted", r.accepted, []);
+    t("a contested lens is unverified, not rejected", r.nodes[0].outcome, "unverified");
+    t("a contested lens is not in rejected", r.rejected, []);
+    t("the warning names both lenses", hasWarning(r, "CONTESTED LENS.*anchors.*invariants"), true);
+    t("the warning carries the concern", hasWarning(r, "the boundary moved"), true);
+    t("...and says which lens to re-run", hasWarning(r, "re-run the invariants lens"), true);
+    // It must not also blame a verifier that ran perfectly well. Matched on the
+    // missing-lens wording, NOT on "UNVERIFIED, not rejected" — the contested
+    // warning says that too, and a regex that both warnings satisfy tests nothing.
+    t("a contested lens does not fake a missing lens", hasWarning(r, "verifiers returned"), false);
+    t("...and names no missing lens", r.nodes[0].missingLenses, []);
+}
+
+// CRY WOLF GUARD (scar #17): the concern only contests a lens that PASSED. If
+// the named lens rejected, the finding already landed and saying it twice trains
+// the operator to skim.
+{
+    const n = node("agreed");
+    const verdicts = [
+        verdict("intent"),
+        verdict("invariants", { verdict: "reject", evidence: ["the boundary moved"] }),
+        verdict("anchors", { crossLens: [{ lens: "invariants", concern: "the boundary moved" }] }),
+    ];
+    const r = run([{ node: n, build: build(), verdicts }]);
+    t("a concern the named lens already rejected is not contested", r.rejected, ["agreed"]);
+    t("...and does not warn twice", hasWarning(r, "CONTESTED LENS"), false);
+}
+
+// A concern naming a lens that never returned adds nothing: the node is already
+// unverified for the missing lens, and there is no verdict to contest.
+{
+    const n = node("namesdead");
+    const verdicts = [
+        verdict("intent"),
+        verdict("anchors", { crossLens: [{ lens: "invariants", concern: "the boundary moved" }] }),
+    ];
+    const r = run([{ node: n, build: build(), verdicts }]);
+    t("a concern naming a lens that never ran is unverified", r.nodes[0].outcome, "unverified");
+    t("...and does not manufacture a contest", hasWarning(r, "CONTESTED LENS"), false);
+    t("...it reports the missing lens instead", r.nodes[0].missingLenses, ["invariants"]);
+}
+
+// A clean crossLens field changes nothing.
+{
+    const n = node("nocross");
+    const r = run([{ node: n, build: build(), verdicts: LENSES.map((l) => verdict(l, { crossLens: [] })) }]);
+    t("an empty crossLens is still accepted", r.accepted, ["nocross"]);
+    t("an empty crossLens produces no warnings", r.warnings, []);
+}
+
+// `couldNotVerify` WARNS but does not block — it is scoped by the prompt to a
+// lens's OWN questions, and an honest "could not reach this" is what the prompt
+// asks for. Blocking would fire on the recommended state (scar #17).
+{
+    const n = node("unanswered");
+    const verdicts = [
+        verdict("intent", { couldNotVerify: ["could not reach the staging config"] }),
+        verdict("invariants"), verdict("anchors"),
+    ];
+    const r = run([{ node: n, build: build(), verdicts }]);
+    t("couldNotVerify does NOT block acceptance", r.accepted, ["unanswered"]);
+    t("couldNotVerify still warns", hasWarning(r, "unanswered question"), true);
+    t("...and says what accepted means", hasWarning(r, "not that every"), true);
+    t("the entries reach the report", r.nodes[0].couldNotVerify, ["could not reach the staging config"]);
+}
+
 console.error(`reduce-fixture: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

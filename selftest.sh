@@ -637,15 +637,25 @@ else
     }
     mutate "unverified collapsed into rejected (scar #2)" "s/: 'unverified';/: 'rejected';/"
     mutate "a missing scope gate defaulted to 0 (scar #8)" "s/r.build?.scopeGate ?? null;/r.build?.scopeGate ?? 0;/"
-    mutate "scope violation dropped from acceptance" "s/&& rejects.length === 0 && scopeClean;/\&\& rejects.length === 0;/"
+    mutate "scope violation dropped from acceptance" \
+        "s/&& rejects.length === 0 && scopeClean && contested.length === 0;/\&\& rejects.length === 0 \&\& contested.length === 0;/"
     mutate "anchor disagreement check disabled (scar #14)" \
         "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (false) {/"
-    mutate "single reject downgraded to a majority vote" "s/rejects.length === 0 && scopeClean;/rejects.length < passes.length && scopeClean;/"
+    mutate "single reject downgraded to a majority vote" \
+        "s/&& rejects.length === 0 && scopeClean/\&\& rejects.length < passes.length \&\& scopeClean/"
     mutate "a not-applicable anchor compared as a number (E#19)" \
         "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (observed[k] !== claimed[k]) {/"
     mutate "a skipped ALWAYS-run anchor treated as success" \
         "s/if (claimed?.\[k\] === undefined || claimed?.\[k\] === null) {/if (false) {/"
     mutate "fan-in guard removed" "s/^if (lost > 0) {/if (false) {/"
+    mutate "a contested lens dropped from acceptance (scar #37)" \
+        "s/&& scopeClean && contested.length === 0;/\&\& scopeClean;/"
+    mutate "a contested lens no longer warns (scar #37)" \
+        "s/for (const c of r.contested) {/for (const c of []) {/"
+    mutate "a concern contests a lens that already rejected (scar #17)" \
+        "s/crossLens.filter((c) => passes.some((v) => v.lens === c.lens));/crossLens.slice();/"
+    mutate "couldNotVerify went silent again on an accepted node" \
+        "s/if (r.outcome === 'accepted' && r.couldNotVerify.length) {/if (false) {/"
 
     # And it must refuse rather than silently pass if someone moves the markers.
     grep -v "REDUCE-BEGIN" "$SB" > "$TMP/nomarker.mjs"
