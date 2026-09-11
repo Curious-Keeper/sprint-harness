@@ -674,8 +674,12 @@ import { readFileSync } from "node:fs";
 const src = readFileSync(process.argv[2], "utf8").replace(/^export const meta/m, "const meta");
 const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
 const calls = [];
+const models = [];
 const agent = async (prompt, opts) => {
     calls.push(opts.label);
+    // `model` ABSENT and `model: null` are different things downstream, so
+    // record which one actually arrived rather than normalising them.
+    models.push([opts.label, "model" in opts ? opts.model : "absent"]);
     if (opts.label.startsWith("verify:")) {
         return { lens: opts.label.split(":")[1], verdict: "reject", evidence: ["planted defect found"],
                  confidence: "high", observedAnchors: { tsc: 0, lint: 0, test: 1 }, observedScopeGate: 0 };
@@ -697,6 +701,7 @@ const harness = {
     agents: { builder: "sprint-builder", verifier: "sprint-verifier" },
     branchPrefix: "sprint", mainBranch: "main",
     scopeGate: ".claude/harness-core/scope-gate.sh", pairedArtifacts: [],
+    ...(process.argv[3] ? { verifierModel: process.argv[3] } : {}),
 };
 const node = (id, extra = {}) => ({ nodeId: id, wave: 0, reason: "r", serial: false, files: ["web/a.tsx"],
     items: [{ id: "x1", title: "t", source: "s", severity: "high", files: ["web/a.tsx"], newFiles: [], detail: "d" }], ...extra });
@@ -713,14 +718,26 @@ console.log(JSON.stringify({
     outcome: p?.outcome,
     claimed: p?.claimedAnchors?.test,
     disagreements: (report.warnings ?? []).filter((w) => /ANCHOR DISAGREEMENT/.test(w)).length,
+    verifyModels: [...new Set(models.filter(([l]) => l.startsWith("verify:")).map(([, m]) => m))].join(","),
+    buildModels: [...new Set(models.filter(([l]) => l.startsWith("build:")).map(([, m]) => m))].join(","),
 }));
 MJS
 pb_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" 2>&1)
 pbcheck() { local got; got=$(jq -r "$2" <<< "$pb_out" 2>/dev/null)
     [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
 pbcheck "a prebuilt node does NOT dispatch a builder" '.builds' "build:normal"
+pbcheck "no verify.model means NO model key reaches the verifier" '.verifyModels' "absent"
 pbcheck "...and is still judged by every lens" '.lenses' 3
 pbcheck "a planted defect comes back REJECTED" '.outcome' "rejected"
+
+# verify.model is how a deliberate second opinion is run: same prompts, one
+# variable. It must reach EVERY verifier and NO builder -- a model that leaked
+# into the builder would change the work being judged, not the judging.
+pbm_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" some-model 2>&1)
+pbmcheck() { local got; got=$(jq -r "$2" <<< "$pbm_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pbmcheck "verify.model reaches every verifier" '.verifyModels' "some-model"
+pbmcheck "...and never reaches a builder" '.buildModels' "absent"
 # The claimed anchors must survive UNVALIDATED, or a canary cannot claim a green
 # it did not earn and the claimed-vs-observed check has nothing to catch.
 pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0
@@ -1320,6 +1337,94 @@ out=$(SPRINT_HARNESS_CONFIG="$TMP/badid.json" node -e \
     'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
 grep -q "bare word" <<< "$out" && ok "refuses an anchor id that breaks the schema" \
                                || no "refuses an anchor id that breaks the schema"
+
+# ── serialised anchors (SCARS #35) ──────────────────────────────────────────
+echo
+echo "── serialised anchors ──"
+
+# The lock is the whole point: two runs must not overlap. Each writes a marker,
+# sleeps, then checks nobody else claimed it meanwhile.
+cat > "$TMP/overlap.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" > "$1/holder"
+sleep 1
+[ "$(cat "$1/holder")" = "$$" ] || echo "OVERLAP" >> "$1/violations"
+SH
+chmod +x "$TMP/overlap.sh"
+mkdir -p "$TMP/lockprobe"
+: > "$TMP/lockprobe/violations"
+for _ in 1 2 3 4; do
+    "$HERE/core/serialize.sh" selftest-overlap "$TMP/overlap.sh" "$TMP/lockprobe" &
+done
+wait
+[ ! -s "$TMP/lockprobe/violations" ] \
+    && ok "serialize.sh actually serialises concurrent runs" \
+    || no "serialize.sh actually serialises concurrent runs"
+
+# A lock that alters what an anchor reports is worse than no lock.
+"$HERE/core/serialize.sh" selftest-rc sh -c 'exit 3'; [ $? -eq 3 ] \
+    && ok "serialize.sh propagates the wrapped exit code" \
+    || no "serialize.sh propagates the wrapped exit code"
+"$HERE/core/serialize.sh" selftest-rc true; [ $? -eq 0 ] \
+    && ok "serialize.sh propagates success" \
+    || no "serialize.sh propagates success"
+
+"$HERE/core/serialize.sh" 2>/dev/null; [ $? -eq 2 ] \
+    && ok "serialize.sh refuses a call with no command" \
+    || no "serialize.sh refuses a call with no command"
+
+# The rendered command must hop out of the anchor's cwd to reach the wrapper,
+# or the builder runs `./.claude/...` from web/ and gets a 127 that reads as a
+# broken node rather than a broken config.
+render_anchor() {
+    node -e '
+const fs=require("fs");
+const src=fs.readFileSync(process.argv[1],"utf8").replace(/^export const meta/m,"const meta");
+const plan=JSON.parse(process.argv[2]);
+// Capture the PROMPT rather than just watching for a throw: what matters is the
+// exact string the builder is handed, including the hop out of the anchor cwd.
+const agent=(prompt)=>{ console.log(prompt); throw new Error("stop-after-render"); };
+const f=new Function("args","agent","parallel","pipeline","log","phase","budget","workflow",
+  "return (async()=>{"+src+"})()");
+f(plan,agent,(fns)=>Promise.all(fns.map(fn=>fn())),()=>{},()=>{},()=>{},{},()=>{})
+  .then(()=>process.exit(0))
+  .catch(e=>{ console.error(e.message); process.exit(0); });
+' "$HERE/core/sprint-batch.mjs" "$1" 2>&1
+}
+mkplan() {
+    cat <<JSON
+{ "batchName":"b","wave":0,"baseBranch":"main",
+  "nodes":[{"nodeId":"N","items":[{"id":"A","title":"t","source":"s","severity":"low","files":["a.ts"],"newFiles":[],"detail":"d"}],
+            "files":["a.ts"],"wave":0,"serial":false,"exclusive":false,"lane":null,"reason":"x"}],
+  "harness":{ "anchors":[{"id":"test","cmd":"npm test","cwd":"web","always":true,"whenTouches":null,"serialize":true}],
+  "setup":[],"lenses":["anchors"],"agents":{"builder":"b","verifier":"v"},
+  "branchPrefix":"sprint","mainBranch":"main","scopeGate":"sg","pairedArtifacts":[]$1 } }
+JSON
+}
+
+# The hop is the part that bites: an anchor with cwd "web" must reach the wrapper
+# at ../.claude/..., or the builder runs it from web/, gets a 127, and reports a
+# number that reads as "this node is broken" rather than "this config is wrong".
+# cwdHop is lifted straight out of the source so the test cannot drift from it.
+hop=$(node -e '
+const fs=require("fs");
+const src=fs.readFileSync(process.argv[1],"utf8");
+const m=src.match(/const cwdHop = [\s\S]*?\n};/);
+if(!m){ console.log("NOTFOUND"); process.exit(0); }
+const cwdHop=eval("("+m[0].replace(/^const cwdHop = /,"").replace(/;$/,"")+")");
+console.log([".","","web","a/b"].map(c=>c+"=>"+cwdHop(c)).join(" "));
+' "$HERE/core/sprint-batch.mjs")
+[ "$hop" = ".=>./ =>./ web=>../ a/b=>../../" ] \
+    && ok "cwdHop reaches the repo root from any anchor cwd" \
+    || no "cwdHop reaches the repo root from any anchor cwd ($hop)"
+
+
+# Silently dropping the lock is the dangerous failure: it looks exactly like an
+# anchor that never needed one, until the next wide wave goes red at random.
+out=$(render_anchor "$(mkplan '')")
+grep -q "no harness.serializer" <<< "$out" \
+    && ok "sprint-batch REFUSES serialize:true with no serializer path" \
+    || no "sprint-batch REFUSES serialize:true with no serializer path"
 
 echo
 echo "════════════════════════"

@@ -1263,3 +1263,71 @@ id can be composite, it must be read line-wise from the moment it is created —
 `for … in $(…)` over ids is the bug, not the escaping.
 
 **Where it lives.** The `while IFS= read -r nodeId` loop in `core/integrate.sh`.
+
+---
+
+## 35. A test anchor that answers a question about CPU load
+
+**What happened.** A wave fanned out 8 nodes — 32 agents — on one 12-core box.
+Each builder and each `anchors` verifier ran the full jsdom suite. Five of the
+eight nodes observed `test=1`; three observed `test=0`. From the same base
+commit. The reduce did exactly what it should and raised an ANCHOR DISAGREEMENT
+on the one node where the builder and its verifier landed on different sides
+(builder 0, verifier 1), and `integrate.sh` then refused to merge the batch.
+
+**Why it was dangerous.** Nothing was broken. Re-measured on a quiet machine, the
+base and the disputed commit were both 972/972, exit 0, and the merged tree was
+green on all seven anchors. Reproduced deliberately afterwards: eight concurrent
+`npm test` runs against that same green tree came back **8/8 red, 28–40 failures
+each, and all 200 failures were `Test timed out in 5000ms`. Not one assertion
+failed.** Most runners size their worker pool to the core count, so N concurrent
+runs oversubscribe the box N-fold before a single test executes.
+
+The wasted triage is the small half. The real damage is that the anchor was
+answering a question about machine load while presenting as a question about the
+code, so a builder and its verifier could honestly disagree at random. That
+manufactures the loudest and rarest signal this system has, and a signal that
+fires at random stops being read. Worse is the habit it teaches: once an anchor
+is known to go red under load, its reds get explained away — which is how a check
+dies (see #17).
+
+**The fix, and why it is structural.** `serialize: true` on an anchor, which
+wraps it in `core/serialize.sh` — a host-wide, name-keyed lock, `flock` where it
+exists and an atomic-`mkdir` spinlock with a staleness check where it does not.
+Only one copy of that anchor runs on the machine at a time, no matter how wide
+the fan-out. It costs wall-clock and buys a number two agents can both stand
+behind, which for an anchor is the right trade every time.
+
+Not fixed by raising the timeout: that hides a real hang behind a slower one, and
+leaves the exit code load-dependent. Not fixed by capping workers either — with
+2N runs the arithmetic still oversubscribes, just later.
+
+**Where it lives.** `core/serialize.sh`; `serialised()` in `core/sprint-batch.mjs`;
+`serialize` in the anchor schema and in `workflowSlice()`.
+
+---
+
+## 36. Every sibling node shares one scratchpad directory
+
+**What happened.** In the same wave, a verifier redirected its anchor output to
+the session scratchpad — `npm test > scratchpad/test.log` — and so did its
+siblings, to the same path. Its log was overwritten by another node's run, and it
+read back five failures belonging to a different branch.
+
+**Why it was dangerous.** It caught the swap only because the runner's own header
+line happened to name the other worktree in the captured output. Nothing else
+would have revealed it. Had the file been one line shorter, the verifier would
+have rejected a node whose diff was fine, citing failures from code it had never
+seen — and the evidence in the verdict would have looked specific and credible.
+
+The general shape: agents are handed an isolated *worktree* and told they are
+isolated, but the scratchpad they are also handed is SHARED across the whole
+wave. Isolation that holds for one resource and not another is worse than no
+isolation, because the contract is what agents reason from.
+
+**The fix.** Both agent contracts now forbid writing an anchor log to any path a
+sibling could also write: keep it inside your own worktree, or put the node id in
+the filename. Stated with the incident attached, because "use a unique filename"
+without the story reads as fussiness and gets dropped under pressure.
+
+**Where it lives.** `templates/sprint-builder.md`, `templates/sprint-verifier.md`.

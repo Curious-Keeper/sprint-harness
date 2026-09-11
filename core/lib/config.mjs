@@ -185,16 +185,27 @@ export function workflowSlice(cfg) {
             cwd: a.cwd ?? ".",
             always: a.always !== false,
             whenTouches: a.whenTouches ?? null,
+            // Take a host-wide lock around this anchor, so a wide fan-out cannot
+            // starve it into a timeout and then report that as a code failure.
+            serialize: a.serialize === true,
         })),
         setup: cfg.setup.map((s) => ({ cmd: s.cmd, cwd: s.cwd ?? ".", why: s.why ?? null })),
         lenses: cfg.verify.lenses,
         requireAllLenses: cfg.verify.requireAllLenses !== false,
+        // OPTIONAL. Null unless a project pins one, and the graph spreads it
+        // only when truthy, so the default path passes no model key at all and
+        // every verifier inherits the main loop exactly as before.
+        verifierModel: cfg.verify.model ?? null,
         agents: cfg.agents,
         branchPrefix: cfg.branchPrefix,
         mainBranch: cfg.project.mainBranch,
         // Where install.sh puts core/. The builder and the anchors lens both shell
         // out to the scope gate, and a Workflow script cannot look it up.
         scopeGate: ".claude/harness-core/scope-gate.sh",
+        // Same reason as scopeGate: an anchor with `serialize: true` is rendered
+        // into an agent prompt wrapped in this, and a Workflow script cannot look
+        // a path up on disk.
+        serializer: ".claude/harness-core/serialize.sh",
         pairedArtifacts: cfg.pairedArtifacts.map((p) => ({ id: p.id, srcDir: p.srcDir })),
     };
 }
