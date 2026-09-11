@@ -516,6 +516,13 @@ const results = await pipeline(
                 phase: 'Verify',
                 agentType: H.agents.verifier,
                 schema: VERDICT_SCHEMA,
+                // OPTIONAL, DEFAULT OFF. Absent, the verifier inherits the main
+                // loop's model and this line changes nothing — which is the
+                // whole point: a second arm has to face the IDENTICAL prompt,
+                // or the comparison measures the prompt rather than the model.
+                // Spread rather than `model: H.verifierModel`, because passing
+                // an explicit null is not the same as not passing the key.
+                ...(H.verifierModel ? { model: H.verifierModel } : {}),
             })),
         ).then((verdicts) => ({ node, build, verdicts: verdicts.filter(Boolean) }));
     },

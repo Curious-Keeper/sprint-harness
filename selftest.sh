@@ -674,8 +674,12 @@ import { readFileSync } from "node:fs";
 const src = readFileSync(process.argv[2], "utf8").replace(/^export const meta/m, "const meta");
 const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
 const calls = [];
+const models = [];
 const agent = async (prompt, opts) => {
     calls.push(opts.label);
+    // `model` ABSENT and `model: null` are different things downstream, so
+    // record which one actually arrived rather than normalising them.
+    models.push([opts.label, "model" in opts ? opts.model : "absent"]);
     if (opts.label.startsWith("verify:")) {
         return { lens: opts.label.split(":")[1], verdict: "reject", evidence: ["planted defect found"],
                  confidence: "high", observedAnchors: { tsc: 0, lint: 0, test: 1 }, observedScopeGate: 0 };
@@ -697,6 +701,7 @@ const harness = {
     agents: { builder: "sprint-builder", verifier: "sprint-verifier" },
     branchPrefix: "sprint", mainBranch: "main",
     scopeGate: ".claude/harness-core/scope-gate.sh", pairedArtifacts: [],
+    ...(process.argv[3] ? { verifierModel: process.argv[3] } : {}),
 };
 const node = (id, extra = {}) => ({ nodeId: id, wave: 0, reason: "r", serial: false, files: ["web/a.tsx"],
     items: [{ id: "x1", title: "t", source: "s", severity: "high", files: ["web/a.tsx"], newFiles: [], detail: "d" }], ...extra });
@@ -713,14 +718,26 @@ console.log(JSON.stringify({
     outcome: p?.outcome,
     claimed: p?.claimedAnchors?.test,
     disagreements: (report.warnings ?? []).filter((w) => /ANCHOR DISAGREEMENT/.test(w)).length,
+    verifyModels: [...new Set(models.filter(([l]) => l.startsWith("verify:")).map(([, m]) => m))].join(","),
+    buildModels: [...new Set(models.filter(([l]) => l.startsWith("build:")).map(([, m]) => m))].join(","),
 }));
 MJS
 pb_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" 2>&1)
 pbcheck() { local got; got=$(jq -r "$2" <<< "$pb_out" 2>/dev/null)
     [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
 pbcheck "a prebuilt node does NOT dispatch a builder" '.builds' "build:normal"
+pbcheck "no verify.model means NO model key reaches the verifier" '.verifyModels' "absent"
 pbcheck "...and is still judged by every lens" '.lenses' 3
 pbcheck "a planted defect comes back REJECTED" '.outcome' "rejected"
+
+# verify.model is how a deliberate second opinion is run: same prompts, one
+# variable. It must reach EVERY verifier and NO builder -- a model that leaked
+# into the builder would change the work being judged, not the judging.
+pbm_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" some-model 2>&1)
+pbmcheck() { local got; got=$(jq -r "$2" <<< "$pbm_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pbmcheck "verify.model reaches every verifier" '.verifyModels' "some-model"
+pbmcheck "...and never reaches a builder" '.buildModels' "absent"
 # The claimed anchors must survive UNVALIDATED, or a canary cannot claim a green
 # it did not earn and the claimed-vs-observed check has nothing to catch.
 pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0

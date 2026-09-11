@@ -204,6 +204,10 @@
                     "type": "boolean",
                     "default": true,
                     "description": "A node is accepted only when every lens actually returned. A lens that crashed leaves the node UNVERIFIED, which is not the same outcome as rejected."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "OPTIONAL, and normally unset. Pins every verifier to one model instead of inheriting the main loop. The prompts are unchanged either way, so the only variable is the model -- which is what makes a second opinion measurable rather than anecdotal. A slug here rots faster than anything else in this file; leave it out unless you are deliberately running a comparison, and never let it silently become the default."
                 }
             }
         },

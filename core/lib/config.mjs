@@ -192,6 +192,10 @@ export function workflowSlice(cfg) {
         setup: cfg.setup.map((s) => ({ cmd: s.cmd, cwd: s.cwd ?? ".", why: s.why ?? null })),
         lenses: cfg.verify.lenses,
         requireAllLenses: cfg.verify.requireAllLenses !== false,
+        // OPTIONAL. Null unless a project pins one, and the graph spreads it
+        // only when truthy, so the default path passes no model key at all and
+        // every verifier inherits the main loop exactly as before.
+        verifierModel: cfg.verify.model ?? null,
         agents: cfg.agents,
         branchPrefix: cfg.branchPrefix,
         mainBranch: cfg.project.mainBranch,
