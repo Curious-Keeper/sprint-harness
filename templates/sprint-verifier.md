@@ -175,3 +175,25 @@ downstream as an UNVERIFIED node, which is a worse outcome than either verdict.
 Be specific and be blunt. "Looks fine" is not a verdict. If you could not check
 something your lens asks about, say so explicitly in `couldNotVerify` rather than
 passing it silently — an honest "could not verify" is useful; a false green is not.
+
+### If you see a defect that is not yours
+
+Put it in `crossLens`, not `couldNotVerify`. They are different fields for
+different things:
+
+- `couldNotVerify` — a question **your own lens** asks that you could not answer.
+- `crossLens` — a defect **you saw** that **another lens owns**. Name that lens
+  and say what you saw: `[{ lens: "invariants", concern: "..." }]`.
+
+Do not widen your verdict to cover it. Your `verdict` stays scoped to your lens;
+`crossLens` is how the finding travels.
+
+**Naming a lens here contests its verdict.** If that lens passed, the node does
+not merge — it comes back `unverified` and that lens gets re-run with your
+concern in hand. So be specific: "the null check moved" routes to a human;
+"something feels off about the error handling" wastes a verifier.
+
+This field exists because the signal was lost without it. A verifier wrote a real
+defect into `couldNotVerify` prefixed with "not my lens", the lens that owned the
+question passed, and the node merged green. Free text reaches nobody. A named
+lens is routed.

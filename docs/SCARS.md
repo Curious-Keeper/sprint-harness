@@ -1331,3 +1331,52 @@ the filename. Stated with the incident attached, because "use a unique filename"
 without the story reads as fussiness and gets dropped under pressure.
 
 **Where it lives.** `templates/sprint-builder.md`, `templates/sprint-verifier.md`.
+
+---
+
+## 37. The lens that saw it had nowhere to put it
+
+**What happened.** A verifier assigned the `anchors` lens read the diff and
+identified a real behavioural defect in it. The defect belonged to another lens,
+so — correctly, per its own contract — it did not widen its verdict to cover it.
+It wrote the finding into `couldNotVerify`, hand-prefixing it with "not my lens".
+
+The lens that owned the question passed. The reduce collected `couldNotVerify`
+into the report and computed `accepted` without ever looking at it. Every lens
+returned, every anchor was green, the node merged.
+
+**Why it was dangerous.** This is not a detection failure. The system SAW the
+defect, wrote it down, and shipped it anyway. No amount of better verification
+fixes that — a second lens, a second model, a second runtime would all have
+produced the same outcome, because the signal was already present and the wiring
+was the part that was missing.
+
+It is also the quietest possible failure. There is no red, no warning, no missing
+lens, no disagreement. The report is indistinguishable from a clean node unless
+someone reads the free text, and the whole point of the reduce is that nobody has
+to.
+
+> A field with no consumer is not a record. It is a place findings go to die, and
+> it looks like diligence on the way in.
+
+**The fix.** Free text cannot be routed, so stop asking it to be. `crossLens` is a
+bounded array of `{ lens, concern }`: the reporting verifier NAMES the lens that
+owns the question. The reduce then has something to act on — when a named lens
+**passed**, the node is contested and does not merge.
+
+The outcome is `unverified`, not `rejected`. Nobody holding that lens made a
+finding, and inventing one is scar #2. Two agents disagree about the same
+territory; the answer is to re-run the lens that owns it, which the warning names.
+
+It only contests a lens that PASSED. If that lens already rejected, the finding
+landed and repeating it spends the operator's attention for nothing — scar #17.
+
+`couldNotVerify` keeps its original, narrower job: questions a lens asks about its
+OWN territory and could not answer. On an accepted node it now warns, but it does
+not block. The prompt asks verifiers to use it, so blocking would fire on the
+state the prompt recommends — scar #17 again, from the other direction.
+
+**Where it lives.** `VERDICT_SCHEMA` and the CONTESTED LENS block of the reduce in
+`core/sprint-batch.mjs`; cases in `core/reduce-fixture.mjs`; four mutations in the
+`── reduce ──` block of `selftest.sh`; the contract in
+`templates/sprint-verifier.md`.
