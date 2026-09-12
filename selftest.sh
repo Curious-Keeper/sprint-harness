@@ -638,11 +638,11 @@ else
     mutate "unverified collapsed into rejected (scar #2)" "s/: 'unverified';/: 'rejected';/"
     mutate "a missing scope gate defaulted to 0 (scar #8)" "s/r.build?.scopeGate ?? null;/r.build?.scopeGate ?? 0;/"
     mutate "scope violation dropped from acceptance" \
-        "s/&& rejects.length === 0 && scopeClean && contested.length === 0;/\&\& rejects.length === 0 \&\& contested.length === 0;/"
+        "s/&& scopeClean && contested.length === 0;/\&\& contested.length === 0;/"
     mutate "anchor disagreement check disabled (scar #14)" \
         "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (false) {/"
     mutate "single reject downgraded to a majority vote" \
-        "s/&& rejects.length === 0 && scopeClean/\&\& rejects.length < passes.length \&\& scopeClean/"
+        "s/&& rejects.length === 0 && confirmRejects.length === 0/\&\& rejects.length < passes.length \&\& confirmRejects.length === 0/"
     mutate "a not-applicable anchor compared as a number (E#19)" \
         "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (observed[k] !== claimed[k]) {/"
     mutate "a skipped ALWAYS-run anchor treated as success" \
@@ -654,10 +654,14 @@ else
         "s/for (const c of r.contested) {/for (const c of []) {/"
     mutate "a concern contests a lens that already rejected (scar #17)" \
         "s/crossLens.filter((c) => passes.some((v) => v.lens === c.lens));/crossLens.slice();/"
-    mutate "couldNotVerify went silent again on an accepted node" \
-        "s/if (r.outcome === 'accepted' && r.couldNotVerify.length) {/if (false) {/"
     mutate "the contested warning calls a REJECTED node unverified (scar #17)" \
         "s/const tail = r.outcome === 'rejected'/const tail = false/"
+    mutate "a confirm-pass reject dropped from acceptance" \
+        "s/&& rejects.length === 0 && confirmRejects.length === 0/\&\& rejects.length === 0/"
+    mutate "an incomplete confirm pass fails a node that already passed" \
+        "s/const accepted = r.build?.status === 'done' && allLensesRan/const accepted = r.build?.status === 'done' \&\& allLensesRan \&\& (r.confirm ? confirmVerdicts.length === lenses.length : true)/"
+    mutate "the confirm pass stops naming what it caught" \
+        "s/for (const c of r.confirmRejects) {/for (const c of []) {/"
 
     # And it must refuse rather than silently pass if someone moves the markers.
     grep -v "REDUCE-BEGIN" "$SB" > "$TMP/nomarker.mjs"

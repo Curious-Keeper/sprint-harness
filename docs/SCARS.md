@@ -1372,9 +1372,16 @@ It only contests a lens that PASSED. If that lens already rejected, the finding
 landed and repeating it spends the operator's attention for nothing — scar #17.
 
 `couldNotVerify` keeps its original, narrower job: questions a lens asks about its
-OWN territory and could not answer. On an accepted node it now warns, but it does
-not block. The prompt asks verifiers to use it, so blocking would fire on the
-state the prompt recommends — scar #17 again, from the other direction.
+OWN territory and could not answer. It neither blocks nor warns. Blocking would
+fire on the state the prompt recommends, since the prompt asks every verifier to
+record what it could not reach — scar #17 from the other direction.
+
+It shipped with a WARNING for one day, on the argument that a warning was the safe
+half of that trade. The next live batch priced it: the warning fired on 6 of 6
+accepted nodes, 4-5 entries each, because every verifier does what the prompt
+asks. A line that appears on 100% of the success state carries no information and
+spends the attention the CONTESTED LENS line needs. The field still reaches the
+report per node, which is where an operator can act on it.
 
 **What the first live run corrected.** The rule fired on its first real batch and
 worked: `crossLens` was used five times across all three lenses, and the contested
@@ -1394,3 +1401,58 @@ being read.
 `core/sprint-batch.mjs`; cases in `core/reduce-fixture.mjs`; five mutations in the
 `── reduce ──` block of `selftest.sh`; the contract in
 `templates/sprint-verifier.md`.
+
+
+---
+
+## 38. Two identical verification runs disagreed about a real defect
+
+**What happened.** A control arm was re-run against the same planted defects:
+same model, same prompts, same branches, same commits, nothing changed but the
+clock. One defect was caught by the `intent` lens in the first run and passed by
+ALL THREE lenses in the repeat. The node was accepted.
+
+A third arm on a different model caught it through `invariants` — which for a
+while looked like evidence that the second model was better at that lens. The
+repeat showed it was not: the spread between two runs of ONE model is at least as
+large as the spread between two models. Any claim about a model being better at a
+lens, made from one arm each, is confounded.
+
+**Why it was dangerous.** Not because a defect escaped once — because of what it
+implies about every green batch. If a complete, all-lenses-passed acceptance is a
+single sample of a noisy process, then "3 lenses, 0 rejects" is not the strong
+statement it reads as, and nothing in the report distinguishes a node that is
+clean from a node that happened to be looked at badly.
+
+It also pointed the cheapest fix in the wrong direction. The instinct was a second
+PROVIDER, to decorrelate systematic blind spots. The data says the dominant
+failure mode is not a blind spot, it is variance — and variance is answered by
+repetition, which needs no second vendor, no adapter, and no new prompt.
+
+**The numbers.** Four arms against a rig of planted defects and known-good
+controls:
+
+- single run: 11 of 12 defects caught (92%)
+- every pairwise union of two runs: 12 of 12 (100%)
+- false rejects: 0 in 12 control-node judgements, including two controls that
+  change behaviour and carry their own tests
+
+The union costs no precision ONLY because rejects are precise. That is the load-
+bearing measurement, and it is the one to re-take before trusting this further:
+if rejects ever start carrying false positives, a second pass manufactures them at
+twice the rate.
+
+**The fix.** `verify.confirmAccepted`, DEFAULT OFF because it doubles verifier
+spend. Nodes the first pass accepted are re-verified with fresh contexts and the
+identical prompts; a reject in either pass fails the node. Only accepted nodes:
+everything else is already not merging.
+
+A verifier that dies in the confirm pass leaves the node ACCEPTED, with a warning.
+The node already cleared a complete first pass, and failing it for a flaky second
+opinion would mean switching confirmation on makes good work fail at random —
+which is how a mechanism gets switched back off and never trusted again.
+
+**Where it lives.** `verify.confirmAccepted` in `harness.config.schema.json` and
+`core/lib/config.mjs`; the CONFIRM WAVE block after the first reduce and the
+confirm handling inside it in `core/sprint-batch.mjs`; five cases in
+`core/reduce-fixture.mjs`; three mutations in `selftest.sh`.

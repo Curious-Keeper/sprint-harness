@@ -5,6 +5,7 @@ export const meta = {
     phases: [
         { title: 'Build', detail: 'one builder per node, each in its own git worktree' },
         { title: 'Verify', detail: 'fresh skeptics per node, one lens each' },
+        { title: 'Confirm', detail: 'verify.confirmAccepted only — the same lenses again on accepted nodes' },
     ],
 };
 
@@ -619,8 +620,22 @@ const report = returned.map((r) => {
         (v.crossLens ?? []).map((c) => ({ from: v.lens, lens: c.lens, concern: c.concern })));
     const contested = crossLens.filter((c) => passes.some((v) => v.lens === c.lens));
 
+    // CONFIRM PASS. Present only when verify.confirmAccepted is on, and only on
+    // nodes the FIRST pass accepted. A reject in either pass fails the node.
+    //
+    // Its verdicts are kept SEPARATE from `verdicts` rather than appended,
+    // because the two passes answer different questions. `allLensesRan` asks
+    // whether the node was fully judged, and the first pass already answered it.
+    // Folding six verdicts into a three-lens completeness check would either
+    // read as "all lenses ran" while one lens is missing and another ran twice,
+    // or fail a node because the SECOND pass came back short — and a flaky
+    // second opinion must never fail work that already cleared the bar.
+    const confirmVerdicts = r.confirm?.verdicts ?? [];
+    const confirmRejects = confirmVerdicts.filter((v) => v.verdict === 'reject');
+
     const accepted = r.build?.status === 'done' && allLensesRan
-        && rejects.length === 0 && scopeClean && contested.length === 0;
+        && rejects.length === 0 && confirmRejects.length === 0
+        && scopeClean && contested.length === 0;
 
     // "Rejected" and "unverified" are DIFFERENT outcomes and must never be
     // collapsed. A node whose verifier crashed has not been judged; reporting it
@@ -633,7 +648,7 @@ const report = returned.map((r) => {
     // is a question nobody answered, and that is `unverified`. Same distinction
     // as a missing lens, for the same reason.
     const outcome = accepted ? 'accepted'
-        : rejects.length > 0 ? 'rejected'
+        : rejects.length > 0 || confirmRejects.length > 0 ? 'rejected'
         : r.build?.status !== 'done' ? 'not-built'
         : scopeGate != null && scopeGate !== 0 ? 'rejected'
         : 'unverified';
@@ -664,6 +679,10 @@ const report = returned.map((r) => {
         couldNotVerify: verdicts.flatMap((v) => v.couldNotVerify ?? []),
         crossLens,
         contested,
+        // null when no confirm pass ran at all, which is not the same as a
+        // confirm pass that ran and returned nothing.
+        confirmRan: r.confirm ? confirmVerdicts.length : null,
+        confirmRejects: confirmRejects.map((v) => ({ lens: v.lens, evidence: v.evidence, confidence: v.confidence })),
         skipped: r.skipped ?? null,
         summary: r.build?.summary ?? null,
     };
@@ -699,20 +718,39 @@ for (const r of report) {
             `${r.nodeId}: CONTESTED LENS — the ${c.from} verifier reports a defect that ${c.lens} ` +
             `owns, and ${c.lens} passed: "${c.concern}". One of the two looked away. ${tail}`);
     }
-    // ...and the same field on a node nobody contested is still worth a line,
-    // because `accepted` has never meant "everything was checked".
-    //
-    // It does NOT block. `couldNotVerify` is scoped by the prompt to questions a
-    // lens asks about its OWN territory, and an honest "could not reach this" is
-    // the behaviour the prompt asks for. Failing the node for it would fire on
-    // the state the prompt recommends, which is scar #17 — the operator learns
-    // to read past the warning, and a real one then arrives looking identical.
-    if (r.outcome === 'accepted' && r.couldNotVerify.length) {
+    // A defect the first pass accepted and a second, independent pass caught.
+    // This is the line the confirm pass exists to produce, and it is worth more
+    // than the node's outcome: it is direct evidence, in this repo, that one
+    // verification run is not enough. Say so where an operator will see it.
+    for (const c of r.confirmRejects) {
         warnings.push(
-            `${r.nodeId}: accepted with ${r.couldNotVerify.length} unanswered question(s) — see ` +
-            `couldNotVerify on this node. Accepted means no lens rejected it, not that every ` +
-            `question was answered.`);
+            `${r.nodeId}: THE CONFIRM PASS CAUGHT THIS — the first verification accepted this node ` +
+            `and a second, independent ${c.lens} verifier rejected it: ` +
+            `${(c.evidence ?? []).join('; ')}`);
     }
+    // The confirm pass is BEST EFFORT. It runs on a node that already cleared a
+    // complete first pass, so a verifier dying in it is a gap in the second
+    // opinion, not a fault in the node. Failing the node here would mean turning
+    // confirmation on makes good work fail at random, which is the fastest way
+    // to have it turned back off.
+    if (r.confirmRan != null && r.confirmRan < lenses.length && r.outcome === 'accepted') {
+        warnings.push(
+            `${r.nodeId}: the confirm pass returned ${r.confirmRan}/${lenses.length} verifiers. The ` +
+            `node stays ACCEPTED on its complete first pass, but it was confirmed by fewer lenses ` +
+            `than it was judged by.`);
+    }
+    // `couldNotVerify` deliberately produces NO warning, and it does not block.
+    //
+    // It shipped with a warning for one day. On the next live batch that warning
+    // fired on 6 of 6 accepted nodes, 4-5 entries each, because the prompt ASKS
+    // every verifier to record what it could not reach and every verifier
+    // honestly does. A line that appears on 100% of the success state carries no
+    // information and spends the attention the CONTESTED LENS warning needs —
+    // scar #17, measured rather than argued.
+    //
+    // The field still reaches the report per node, which is where an operator
+    // reading one node's outcome can actually use it.
+    //
     // Only when lenses are actually missing. A node can now be `unverified`
     // because nobody reported the scope gate even though all three lenses ran,
     // and printing "missing []" at the operator sends them looking for a dead
@@ -786,14 +824,64 @@ return {
 }
 // ──REDUCE-END── (sliced by selftest.sh — do not delete this marker)
 
-const reduced = reduceWave({
+const reduceArgs = {
     nodes,
     results,
     lenses: LENSES,
     anchorIds: ANCHOR_IDS,
     requiredAnchorIds: H.anchors.filter((a) => a.always !== false).map((a) => a.id),
     requireAllLenses: H.requireAllLenses,
-});
+};
+
+let reduced = reduceWave(reduceArgs);
+
+// ── CONFIRM WAVE — the same lenses, a second time, on what was accepted ──────
+//
+// OFF unless verify.confirmAccepted is set, because it DOUBLES the verifier
+// spend. What it buys is measured, not assumed: over four arms against a rig of
+// planted defects, ONE run caught 11 of 12 while every pairwise union of two
+// runs caught 12 of 12. The dominant failure mode is run-to-run variance within
+// one model, not a systematic blind spot — so a second sample of the SAME
+// prompts and the SAME model is the fix, and a second vendor is not needed.
+//
+// The union costs no precision only because rejects are precise: 0 false
+// rejects in 12 control-node judgements. If that ever stops being true, this
+// mechanism starts manufacturing false rejects at twice the rate, so re-measure
+// before widening it.
+//
+// Only accepted nodes are re-verified. Everything else is already not merging,
+// and spending a second wave to re-reject it buys nothing.
+if (H.confirmAccepted && reduced.accepted.length) {
+    const toConfirm = new Set(reduced.accepted);
+    log(`confirm wave: re-verifying ${toConfirm.size} accepted node(s) with fresh contexts`);
+
+    const confirmed = await parallel(
+        results.filter((r) => r && toConfirm.has(r.node.nodeId)).map((r) => () =>
+            parallel(
+                LENSES.map((lens) => () => agent(verifyPrompt(r.node, r.build, lens), {
+                    // A DIFFERENT label, so the two passes are distinguishable in
+                    // the transcript. The PROMPT is identical on purpose: a second
+                    // sample has to face the same question, or it measures the
+                    // rewrite rather than the variance.
+                    label: `confirm:${lens}:${r.node.nodeId}`,
+                    phase: 'Confirm',
+                    agentType: H.agents.verifier,
+                    schema: VERDICT_SCHEMA,
+                    ...(H.verifierModel ? { model: H.verifierModel } : {}),
+                })),
+            ).then((verdicts) => ({ nodeId: r.node.nodeId, verdicts: verdicts.filter(Boolean) })),
+        ),
+    );
+
+    for (const c of confirmed.filter(Boolean)) {
+        const r = results.find((x) => x && x.node.nodeId === c.nodeId);
+        if (r) r.confirm = { verdicts: c.verdicts };
+    }
+
+    // Re-reduce over the SAME pure function rather than patching the first
+    // report. One classifier, one set of rules, one thing to test.
+    reduced = reduceWave(reduceArgs);
+}
 
 log(`wave ${WAVE} done: ${reduced.accepted.length}/${reduced.dispatched} accepted, ${reduced.warnings.length} warning(s)`);
 
