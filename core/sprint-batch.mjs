@@ -681,10 +681,23 @@ for (const r of report) {
     // it names both so the operator can re-run the one that owns it rather than
     // re-running the whole node.
     for (const c of r.contested) {
+        // The closing sentence is CONDITIONAL, because a contested node is not
+        // always unverified. Another lens may have rejected it outright, and on
+        // the first live run of this rule that is exactly what happened: two
+        // lenses rejected the node, a third passed it, and the warning told the
+        // operator it was "UNVERIFIED, not rejected" about a node sitting in
+        // the rejected list.
+        //
+        // A warning that misdescribes the state it just fired on is scar #17
+        // wearing a different hat — it spends the operator's attention and
+        // teaches them the line is not worth reading.
+        const tail = r.outcome === 'rejected'
+            ? `The node is rejected on other lenses regardless, so this changes no merge ` +
+              `decision — it is a finding about ${c.lens}, which passed something it owns.`
+            : `This is UNVERIFIED, not rejected — re-run the ${c.lens} lens with that concern in hand.`;
         warnings.push(
             `${r.nodeId}: CONTESTED LENS — the ${c.from} verifier reports a defect that ${c.lens} ` +
-            `owns, and ${c.lens} passed: "${c.concern}". One of the two looked away. This is ` +
-            `UNVERIFIED, not rejected — re-run the ${c.lens} lens with that concern in hand.`);
+            `owns, and ${c.lens} passed: "${c.concern}". One of the two looked away. ${tail}`);
     }
     // ...and the same field on a node nobody contested is still worth a line,
     // because `accepted` has never meant "everything was checked".

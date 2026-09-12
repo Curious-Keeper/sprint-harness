@@ -1376,7 +1376,21 @@ OWN territory and could not answer. On an accepted node it now warns, but it doe
 not block. The prompt asks verifiers to use it, so blocking would fire on the
 state the prompt recommends — scar #17 again, from the other direction.
 
+**What the first live run corrected.** The rule fired on its first real batch and
+worked: `crossLens` was used five times across all three lenses, and the contested
+entry was the sharpest line in the report — one lens explaining why another lens's
+green anchors bound nothing. The WARNING was wrong, though. It closed with "This
+is UNVERIFIED, not rejected" on a node two other lenses had already rejected, so
+it described a state the node was not in.
+
+A contested node is only unverified when nothing else rejected it. The sentence is
+now conditional, and when the node is rejected anyway the warning says so and
+reframes itself as a finding about the lens that passed. Scar #17 does not only
+cover checks that fire on the success state; it covers any check whose text the
+operator can discover is false, because that is the same lesson — the line stops
+being read.
+
 **Where it lives.** `VERDICT_SCHEMA` and the CONTESTED LENS block of the reduce in
-`core/sprint-batch.mjs`; cases in `core/reduce-fixture.mjs`; four mutations in the
+`core/sprint-batch.mjs`; cases in `core/reduce-fixture.mjs`; five mutations in the
 `── reduce ──` block of `selftest.sh`; the contract in
 `templates/sprint-verifier.md`.

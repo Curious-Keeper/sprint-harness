@@ -656,6 +656,8 @@ else
         "s/crossLens.filter((c) => passes.some((v) => v.lens === c.lens));/crossLens.slice();/"
     mutate "couldNotVerify went silent again on an accepted node" \
         "s/if (r.outcome === 'accepted' && r.couldNotVerify.length) {/if (false) {/"
+    mutate "the contested warning calls a REJECTED node unverified (scar #17)" \
+        "s/const tail = r.outcome === 'rejected'/const tail = false/"
 
     # And it must refuse rather than silently pass if someone moves the markers.
     grep -v "REDUCE-BEGIN" "$SB" > "$TMP/nomarker.mjs"

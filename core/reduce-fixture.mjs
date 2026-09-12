@@ -293,6 +293,26 @@ const hasWarning = (r, re) => r.warnings.some((w) => new RegExp(re).test(w));
     t("...and does not warn twice", hasWarning(r, "CONTESTED LENS"), false);
 }
 
+// A contested node that ANOTHER lens rejected is `rejected`, not `unverified`,
+// and the warning must not say otherwise. The first live run of the contested
+// rule produced exactly this shape — two lenses rejecting, a third passing what
+// it owned — and the warning claimed the node was unverified.
+{
+    const n = node("contestedandrejected");
+    const verdicts = [
+        verdict("intent", { verdict: "reject", evidence: ["the item asked for a tidy, this removes a guard"] }),
+        verdict("invariants", { crossLens: [{ lens: "anchors", concern: "green binds nothing here" }] }),
+        verdict("anchors"),
+    ];
+    const r = run([{ node: n, build: build(), verdicts }]);
+    t("a contested node another lens rejected is rejected", r.nodes[0].outcome, "rejected");
+    t("the contest is still reported", hasWarning(r, "CONTESTED LENS"), true);
+    t("the warning does NOT call a rejected node unverified",
+        hasWarning(r, "UNVERIFIED, not rejected"), false);
+    t("...it says the merge decision is unchanged",
+        hasWarning(r, "changes no merge decision"), true);
+}
+
 // A concern naming a lens that never returned adds nothing: the node is already
 // unverified for the missing lens, and there is no verdict to contest.
 {
