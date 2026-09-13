@@ -855,27 +855,40 @@ if (H.confirmAccepted && reduced.accepted.length) {
     const toConfirm = new Set(reduced.accepted);
     log(`confirm wave: re-verifying ${toConfirm.size} accepted node(s) with fresh contexts`);
 
-    const confirmed = await parallel(
-        results.filter((r) => r && toConfirm.has(r.node.nodeId)).map((r) => () =>
-            parallel(
-                LENSES.map((lens) => () => agent(verifyPrompt(r.node, r.build, lens), {
-                    // A DIFFERENT label, so the two passes are distinguishable in
-                    // the transcript. The PROMPT is identical on purpose: a second
-                    // sample has to face the same question, or it measures the
-                    // rewrite rather than the variance.
-                    label: `confirm:${lens}:${r.node.nodeId}`,
-                    phase: 'Confirm',
-                    agentType: H.agents.verifier,
-                    schema: VERDICT_SCHEMA,
-                    ...(H.verifierModel ? { model: H.verifierModel } : {}),
-                })),
-            ).then((verdicts) => ({ nodeId: r.node.nodeId, verdicts: verdicts.filter(Boolean) })),
-        ),
-    );
+    const targets = results.filter((r) => r && toConfirm.has(r.node.nodeId));
 
-    for (const c of confirmed.filter(Boolean)) {
-        const r = results.find((x) => x && x.node.nodeId === c.nodeId);
-        if (r) r.confirm = { verdicts: c.verdicts };
+    // ONE FLAT parallel over (node x lens), not a parallel of parallels. The
+    // verify stage's nesting works because the outer layer is `pipeline`, which
+    // is a different thing; nesting parallel inside parallel is a shape nothing
+    // in this kit has ever run, and the place to find that out is not a live
+    // wave costing a second full set of verifiers.
+    const jobs = [];
+    for (const r of targets) {
+        for (const lens of LENSES) {
+            jobs.push(() => agent(verifyPrompt(r.node, r.build, lens), {
+                // A DIFFERENT label, so the two passes are distinguishable in
+                // the transcript. The PROMPT is identical on purpose: a second
+                // sample has to face the same question, or it measures the
+                // rewrite rather than the variance.
+                label: `confirm:${lens}:${r.node.nodeId}`,
+                phase: 'Confirm',
+                agentType: H.agents.verifier,
+                schema: VERDICT_SCHEMA,
+                ...(H.verifierModel ? { model: H.verifierModel } : {}),
+            }).then((verdict) => ({ nodeId: r.node.nodeId, verdict })));
+        }
+    }
+
+    // Seeded EMPTY for every target before anything is collected, so a node
+    // whose confirm verifiers all died reports `confirmRan: 0` rather than
+    // `null`. "Ran and returned nothing" and "never ran" are different states
+    // and the reduce treats them differently.
+    for (const r of targets) r.confirm = { verdicts: [] };
+
+    for (const out of (await parallel(jobs)).filter(Boolean)) {
+        if (!out.verdict) continue;
+        const r = targets.find((x) => x.node.nodeId === out.nodeId);
+        if (r) r.confirm.verdicts.push(out.verdict);
     }
 
     // Re-reduce over the SAME pure function rather than patching the first

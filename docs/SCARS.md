@@ -1392,7 +1392,15 @@ it described a state the node was not in.
 
 A contested node is only unverified when nothing else rejected it. The sentence is
 now conditional, and when the node is rejected anyway the warning says so and
-reframes itself as a finding about the lens that passed. Scar #17 does not only
+reframes itself as a finding about the lens that passed. Both branches were then
+exercised on the next live batch, one node each.
+
+That batch also produced the rule's best evidence so far: a lens contested a
+KNOWN-GOOD control and was right. The node routed a handler through a JSON helper
+as asked, and `json.NewEncoder().Encode` appends a trailing newline, so the
+response body changed by one byte that the item never mentioned. Four earlier
+batches had accepted that node. The lens that noticed did not own the question,
+which is precisely why it had nowhere to put the finding before `crossLens`. Scar #17 does not only
 cover checks that fire on the success state; it covers any check whose text the
 operator can discover is false, because that is the same lesson — the line stops
 being read.
@@ -1451,6 +1459,20 @@ A verifier that dies in the confirm pass leaves the node ACCEPTED, with a warnin
 The node already cleared a complete first pass, and failing it for a flaky second
 opinion would mean switching confirmation on makes good work fail at random —
 which is how a mechanism gets switched back off and never trusted again.
+
+**What the first live run showed, and what it did not.** The wave dispatches: 15
+confirm verifiers ran over the five accepted nodes of a seven-node batch, each
+returned a full set of lenses, and the re-reduce produced a coherent report.
+`confirmRan` read 3 on confirmed nodes and `null` on the two that were never
+confirmed, so "ran and returned nothing" stayed distinct from "never ran" outside
+the fixture too.
+
+It has still never CAUGHT anything. The only defect in that batch was rejected by
+the first pass, so it was never re-verified — confirmation runs on accepted nodes
+by definition. Its detection value rests on the union measurement above, not on
+anything observed in a live wave. Seeing it catch something requires a defect the
+first pass accepts, which is the variance case that cannot be summoned on demand.
+Do not upgrade "it runs" to "it works" in any summary of this.
 
 **Where it lives.** `verify.confirmAccepted` in `harness.config.schema.json` and
 `core/lib/config.mjs`; the CONFIRM WAVE block after the first reduce and the
