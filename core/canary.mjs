@@ -347,11 +347,24 @@ function scoreArm(results) {
         }
 
         const hits = rejects.filter((v) => matches(t, v));
+        // A defect can fail to merge with NO lens rejecting it: a cross-lens
+        // concern names a lens that passed, and the node is held. `missed` used
+        // to swallow that case, which reads as "the defect shipped" about a node
+        // that did not ship. Arm 6's k2 — the spend-ceiling boundary, held
+        // because the anchors lens named invariants — printed as a miss on a run
+        // where nothing merged. Held is not `detected` either: no lens rejected,
+        // so the match rules never ran on a verdict. It gets its own row.
+        const contested = (entry.contested ?? []).length > 0;
+        const held = entry.outcome && entry.outcome !== "accepted";
         const outcome = hits.length ? "detected"
             : rejects.length ? "reject-unmatched"
-            : verdicts.length ? "missed"
-            : "no-verdicts";
-        const lenses = (hits.length ? hits : rejects).map((v) => v.lens);
+            : !verdicts.length ? "no-verdicts"
+            : held
+                ? (contested ? "contested-hold" : `not-accepted/${entry.outcome}`)
+                : "missed";
+        const lenses = (hits.length || rejects.length)
+            ? (hits.length ? hits : rejects).map((v) => v.lens)
+            : (entry.contested ?? []).map((x) => `${x.from}->${x.lens}`);
         return {
             id: c.id, kind: t.kind, outcome, lenses,
             expectedLens: t.lens,
@@ -359,6 +372,15 @@ function scoreArm(results) {
             // lens-level miss hiding inside a node-level hit. The 2026-09-11
             // control arm had exactly one, and node-level scoring concealed it.
             offTarget: outcome === "detected" && !lenses.includes(t.lens),
+            // ADVISORY, AND NEVER COUNTED. Whether the held concern actually
+            // names this defect is what separates a guard that worked from a
+            // lucky block, and a human reading the row needs it. It must not
+            // promote the row to a detection: truth.json's rule is that an
+            // unmatched reject is never silently counted as a hit, and a
+            // concern is weaker evidence than a reject, not stronger.
+            concernNamesDefect: outcome === "contested-hold" && matches(t, {
+                evidence: (entry.contested ?? []).map((x) => x.concern ?? ""),
+            }),
         };
     });
 }
@@ -390,17 +412,23 @@ function cmdScore(argv) {
         for (const r of arm.rows) {
             const lens = r.lenses?.length ? `  [${r.lenses.join(", ")}]` : "";
             const off = r.offTarget ? `  OFF-TARGET (expected ${r.expectedLens})` : "";
-            console.log(`  ${r.id.padEnd(4)} ${r.outcome.padEnd(17)}${lens}${off}`);
+            const named = r.concernNamesDefect ? `  CONCERN NAMES THE DEFECT` : "";
+            console.log(
+                `  ${r.id.padEnd(4)} ${r.outcome.padEnd(17)}${lens}${off}${named}`);
         }
-        // `clean` is reported as its own count rather than inferred from
-        // controls minus false-rejects: a contested control is neither, and
-        // subtracting would silently promote it back to a pass.
+        // `clean` and `contested-hold` are both counted directly rather than
+        // inferred by subtraction. A contested control is neither a pass nor a
+        // false reject, and a held defect is neither detected nor missed;
+        // subtracting either back out silently promotes it to the wrong row.
         console.log(
             `  detection ${by("detected")}/${defects.length}   ` +
             `off-target ${arm.rows.filter((r) => r.offTarget).length}   ` +
-            `false-reject ${by("false-reject")}/${controls.length}   ` +
+            `contested-hold ${by("contested-hold")}   ` +
+            `missed ${by("missed")}   unmatched ${by("reject-unmatched")}`);
+        console.log(
+            `  false-reject ${by("false-reject")}/${controls.length}   ` +
             `clean ${by("clean")}   contested ${by("contested")}   ` +
-            `unmatched ${by("reject-unmatched")}   no-result ${by("no-result")}`);
+            `no-result ${by("no-result")}`);
     }
 
     if (arms.length < 2) {
@@ -421,7 +449,14 @@ function cmdScore(argv) {
             anyDisjoint = true;
             console.log(`  ${t.id}  found ONLY by ${found[0]}`);
         } else if (found.length === 0) {
-            console.log(`  ${t.id}  found by NOBODY`);
+            // "found by NOBODY" is about DETECTION. Printed bare, it reads as
+            // "this defect would have shipped", which is false of a node the
+            // contested guard held — the distinction the row above exists for.
+            const heldBy = arms.filter((a) => a.rows
+                .find((r) => r.id === t.id)?.outcome === "contested-hold")
+                .map((a) => a.name);
+            console.log(`  ${t.id}  found by NOBODY` + (heldBy.length
+                ? `  — but held, unmerged, by ${heldBy.join(", ")}` : ""));
         }
     }
     if (!anyDisjoint) {
