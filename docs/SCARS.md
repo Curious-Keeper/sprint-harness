@@ -751,13 +751,33 @@ input correctly. It does **not** show the lenses detect anything. A verifier tha
 rubber-stamps everything emits `pass` verdicts that this fixture would happily
 classify as `accepted`. The portable kit's headline result — 10 of 10 nodes
 accepted first pass, zero rejects — is consistent with three working lenses and
-equally consistent with three that are not looking. **A live canary node, with a
-deliberately wrong change in it, has not yet been run through this kit.** Until
-one produces a reject, the verify half of the diamond is an architecture diagram.
+equally consistent with three that are not looking.
+
+**The second instrument, and what it found.** `core/canary.mjs` plants known
+defects on branches, emits them as `prebuilt` nodes so no builder runs, and
+scores the verdicts against ground truth. The lenses do reject: across the arms
+run 2026-09-11 to 2026-09-13, detection ran 3/4 to 4/4 with 0/2 false rejects on
+clean controls. So the verify half is no longer an architecture diagram — but the
+rig moved the gap rather than closing it. **Two runs identical in every respect
+disagreed on a real defect**, and the second accepted the node, which makes
+run-to-run variance inside one model a larger effect than any systematic blind
+spot. It also caught two things node-level scoring hides: a defect caught by a
+lens that does not own it is a lens-level miss inside a node-level hit
+(`off-target`), and a lens that names a defect in another lens's territory files
+it under `couldNotVerify`, which gates nothing.
+
+**The rig is not in this repo, and that is the point.** An early arm caught a
+verifier grepping the ground-truth manifest out of the working tree it was
+launched from. The tool ships in `core/`; the cases, the patches and the answers
+live in a rig directory outside every repo under test, and `install.sh` is the
+one place that knows `canary.mjs` must not be copied in with the rest of `core/`.
+Gitignoring is not enough — an ignored file is still greppable.
 
 **Where it lives.** The `──REDUCE-BEGIN──`/`──REDUCE-END──` markers in
 `core/sprint-batch.mjs`, `core/reduce-fixture.mjs`, and the `── reduce ──` block
-in `selftest.sh`.
+in `selftest.sh`. The canary is `core/canary.mjs`, the exclusion is in
+`install.sh`, and both are asserted by the `── canary rig ──` block in
+`selftest.sh`.
 
 ---
 

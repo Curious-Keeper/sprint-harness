@@ -13,6 +13,14 @@
 # concluded "the quarantine is a launcher". An instruction is a suggestion to a
 # model. A PreToolUse deny is a gate the model never gets to argue with.
 #
+# WHAT THIS IS STANDING IN FRONT OF. Builders run in `git worktree`s, and a
+# worktree SHARES `.git/config` with the parent — remotes included. An agent in
+# one has the project's real `origin` in reach, and this hook is the only thing
+# between them. So this is a RUNTIME guarantee, not a substrate one: it holds as
+# far as the runtime it is installed in and no further. A `git clone --shared`
+# with `origin` removed would carry it structurally instead. See DESIGN.md,
+# known gaps.
+#
 # Fails CLOSED: any unreadable payload, missing jq, or unexpected shape denies.
 # A hook that errors open is the same as no hook.
 #
