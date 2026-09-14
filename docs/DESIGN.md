@@ -90,6 +90,25 @@ real finding.
 This is why `verify.lenses` is a list of names the schema enumerates, not a count.
 Adding a fourth lens means writing a fourth question.
 
+**Two of the three shipped lenses are read-only; the third is not.** `intent` and
+`invariants` read a branch and judge it. `anchors` is handed a worktree to create,
+a `setup` block to run, anchors to execute and a scope gate to shell out to — it
+is a build-executing lens that happens to be driven by a model. The asymmetry
+matters twice. It is why `anchors` is the strongest candidate in the kit for
+demotion to plain code: a process can run anchors in a fresh tree and report exit
+codes with no model in the loop at all. And it is why the two *judgment* lenses
+are the only ones worth decorrelating — a second opinion on an exit code is the
+same exit code.
+
+**The trap in `verify.lenses`: it is the REQUIRED set, not a menu.**
+`requireAllLenses` compares `verdicts.length === lenses.length`, and
+`missingLenses` is computed over the same array. So putting a lens id there is a
+promise that the lens will always produce a verdict, and the first time it is
+missing, misconfigured or rate-limited, **every node in the wave goes
+`unverified`** and the queue halts. A lens that cannot make that promise needs to
+be surfaced without being counted — reported, not voting — and `reduceWave` has
+no such path today.
+
 ### 4. Refusal is a first-class outcome
 
 At every level the system prefers to refuse rather than guess:
@@ -154,14 +173,31 @@ by whoever got burned. It cannot be extracted.
 
 Honest list of what this kit does not yet do.
 
-- **The LENSES have never been shown to reject on this kit.** This is the big one.
-  `selftest.sh` covers 205 assertions and `core/reduce-fixture.mjs` proves the
-  reduce classifies bad input correctly, but neither shows a *verifier* detecting
-  anything. A lens that rubber-stamps everything emits `pass` verdicts the reduce
-  would happily call `accepted`. Proving detection needs a live batch containing a
-  deliberately broken node — wrong copy, an extra file, a failing invariant — and
-  that has not been run. Until one produces a reject, the verify half is an
-  architecture diagram. See SCARS.md #22.
+- **The verify stage is less deterministic than its reports imply.** This is now
+  the big one, and it replaces the older gap — "the lenses have never been shown
+  to reject" — which `core/canary.mjs` closed. Planted defects on prebuilt
+  branches do get rejected, and clean controls do not: across the arms run
+  2026-09-11 to 2026-09-13, detection ran 3/4 to 4/4 with 0/2 false rejects. The
+  problem the rig surfaced instead is **run-to-run variance inside one model**.
+  Two runs identical in every respect — same plan, same branches, same prompts,
+  same model — disagreed on a real defect, and the second accepted the node. So a
+  node accepted with zero rejects on a single run is weaker evidence than the
+  report makes it look, and `verify.confirmAccepted` exists for exactly that,
+  switched off by default because it doubles verifier spend. Two narrower gaps
+  fall out of the same finding: a lens that names a defect in another lens's
+  territory files it under `couldNotVerify`, which gates nothing, and detection is
+  proven against one project's rig rather than in general. See SCARS.md #22.
+- **The "cannot publish" guarantee is enforced by the runtime, not by the
+  substrate.** Builders run in `git worktree`s, and a worktree shares
+  `.git/config` with the parent — **remotes included**. So an agent sitting in one
+  has the project's real `origin` in reach, and the only thing in front of it is
+  the `deny-push` PreToolUse hook. That guard is real (see scar #8) but it holds
+  exactly as far as the runtime it is installed in: it is a configured guarantee,
+  not a structural one. `git clone --shared` with `origin` removed would put the
+  guarantee in the filesystem instead — nothing to push to, because no destination
+  is configured — at the cost of a clone per node rather than a worktree.
+  `--shared` uses alternates, so the object database is not copied and the cost is
+  small, but nothing in the kit does this today.
 - **The graph is still not covered end to end.** `core/sprint-batch.mjs` needs a
   live agent runtime. The reduce inside it is now sliced out by
   `core/reduce-fixture.mjs` and mutation-tested, but the agent orchestration

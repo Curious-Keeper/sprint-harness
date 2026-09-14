@@ -52,6 +52,20 @@ echo "── install ──"
     && ok "install.sh completes" || no "install.sh completes"
 [ -x "$REPO/.claude/hooks/deny-push.sh" ] && ok "push guard placed" || no "push guard placed"
 [ -f "$REPO/.claude/harness-core/plan-batch.mjs" ] && ok "core placed" || no "core placed"
+
+# core/canary.mjs is the ONE file in core/ the installer must NOT place. It
+# plants known defects and names the directory holding the ground truth, so
+# installed it sits in a tree the verifier it is measuring can read. That is
+# not a style preference: the 2026-09-11 control arm caught a verifier grepping
+# the ground-truth manifest out of its own working tree. Asserted here because
+# a `cp -r core` that quietly starts copying it again breaks nothing loudly.
+[ -e "$REPO/.claude/harness-core/canary.mjs" ] \
+    && no "canary.mjs is NOT installed into a project" \
+    || ok "canary.mjs is NOT installed into a project"
+rig_leak=$(grep -rl 'CANARY_RIG\|\.claude/canary' "$REPO/.claude" 2>/dev/null)
+[ -z "$rig_leak" ] \
+    && ok "...and nothing installed names the rig directory" \
+    || no "...and nothing installed names the rig directory ($rig_leak)"
 jq -e '.hooks.PreToolUse[0].hooks[0].statusMessage == "push guard"' \
     "$REPO/.claude/settings.json" >/dev/null 2>&1 \
     && ok "settings.json wired" || no "settings.json wired"
@@ -638,11 +652,11 @@ else
     mutate "unverified collapsed into rejected (scar #2)" "s/: 'unverified';/: 'rejected';/"
     mutate "a missing scope gate defaulted to 0 (scar #8)" "s/r.build?.scopeGate ?? null;/r.build?.scopeGate ?? 0;/"
     mutate "scope violation dropped from acceptance" \
-        "s/&& rejects.length === 0 && scopeClean && contested.length === 0;/\&\& rejects.length === 0 \&\& contested.length === 0;/"
+        "s/&& scopeClean && contested.length === 0;/\&\& contested.length === 0;/"
     mutate "anchor disagreement check disabled (scar #14)" \
         "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (false) {/"
     mutate "single reject downgraded to a majority vote" \
-        "s/&& rejects.length === 0 && scopeClean/\&\& rejects.length < passes.length \&\& scopeClean/"
+        "s/&& rejects.length === 0 && confirmRejects.length === 0/\&\& rejects.length < passes.length \&\& confirmRejects.length === 0/"
     mutate "a not-applicable anchor compared as a number (E#19)" \
         "s/if (observed\[k\] != null && claimed\[k\] != null && observed\[k\] !== claimed\[k\]) {/if (observed[k] !== claimed[k]) {/"
     mutate "a skipped ALWAYS-run anchor treated as success" \
@@ -654,8 +668,14 @@ else
         "s/for (const c of r.contested) {/for (const c of []) {/"
     mutate "a concern contests a lens that already rejected (scar #17)" \
         "s/crossLens.filter((c) => passes.some((v) => v.lens === c.lens));/crossLens.slice();/"
-    mutate "couldNotVerify went silent again on an accepted node" \
-        "s/if (r.outcome === 'accepted' && r.couldNotVerify.length) {/if (false) {/"
+    mutate "the contested warning calls a REJECTED node unverified (scar #17)" \
+        "s/const tail = r.outcome === 'rejected'/const tail = false/"
+    mutate "a confirm-pass reject dropped from acceptance" \
+        "s/&& rejects.length === 0 && confirmRejects.length === 0/\&\& rejects.length === 0/"
+    mutate "an incomplete confirm pass fails a node that already passed" \
+        "s/const accepted = r.build?.status === 'done' && allLensesRan/const accepted = r.build?.status === 'done' \&\& allLensesRan \&\& (r.confirm ? confirmVerdicts.length === lenses.length : true)/"
+    mutate "the confirm pass stops naming what it caught" \
+        "s/for (const c of r.confirmRejects) {/for (const c of []) {/"
 
     # And it must refuse rather than silently pass if someone moves the markers.
     grep -v "REDUCE-BEGIN" "$SB" > "$TMP/nomarker.mjs"
@@ -752,6 +772,221 @@ pbmcheck "...and never reaches a builder" '.buildModels' "absent"
 # it did not earn and the claimed-vs-observed check has nothing to catch.
 pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0
 pbcheck "...so the claimed-vs-observed disagreement still fires" '.disagreements' 2
+
+# ── canary rig ───────────────────────────────────────────────────────────────
+#
+# The instrument that answers "does a lens detect anything", run against a repo
+# built here — which is the whole point of it living in core/ rather than in one
+# project's private directory. The rig (cases, patches, ground truth) stays
+# outside the repo under test; only the tool is shared.
+#
+# What this proves: the tool plants from an arbitrary rig directory, emits a
+# plan the shipped graph accepts, and scores a result file correctly — including
+# the off-target case, where a defect is caught by a lens that does not own it.
+# That distinction is the one node-level scoring concealed in the control arm.
+echo
+echo "── canary rig ──"
+CN="$TMP/canary-repo"
+mkdir -p "$CN/src"
+git init -q "$CN"; git -C "$CN" config user.email t@t.t; git -C "$CN" config user.name t
+echo "// src/alpha.tsx" > "$CN/src/alpha.tsx"
+echo "// src/beta.tsx"  > "$CN/src/beta.tsx"
+git -C "$CN" add -A && git -C "$CN" commit -qm init
+"$HERE/install.sh" "$CN" --stack node-web >/dev/null 2>&1
+cat > "$CN/.claude/harness.config.json" <<'JSON'
+{
+    "project": { "name": "canary-fixture", "mainBranch": "main" },
+    "queue":   { "path": ".claude/work/QUEUE.json" },
+    "anchors": [ { "id": "test", "cmd": "true", "cwd": "." } ],
+    "git": { "stackBranches": false }
+}
+JSON
+git -C "$CN" add -A && git -C "$CN" commit -qm harness
+CN_BASE=$(git -C "$CN" rev-parse HEAD)
+
+RIG="$TMP/canary-rig"; mkdir -p "$RIG/patches"
+cat > "$RIG/patches/c1.patch" <<'PATCH'
+--- a/src/alpha.tsx
++++ b/src/alpha.tsx
+@@ -1 +1,2 @@
+ // src/alpha.tsx
++export const load = (x) => { try { return parse(x); } catch { return {}; } };
+PATCH
+cat > "$RIG/patches/c2.patch" <<'PATCH'
+--- a/src/beta.tsx
++++ b/src/beta.tsx
+@@ -1 +1,2 @@
+ // src/beta.tsx
++export const beta = 1;
+PATCH
+cat > "$RIG/cases.json" <<JSON
+{
+  "repo": "$CN",
+  "base": "$CN_BASE",
+  "branchPrefix": "sprint/batch-qa",
+  "cases": [
+    { "id": "c1", "patch": "patches/c1.patch", "files": ["src/alpha.tsx"],
+      "item": { "id": "Q1", "title": "parse config defensively", "detail": "d" } },
+    { "id": "c2", "patch": "patches/c2.patch", "files": ["src/beta.tsx"],
+      "item": { "id": "Q2", "title": "export the beta constant", "detail": "d" } }
+  ]
+}
+JSON
+cat > "$RIG/truth.json" <<'JSON'
+{
+  "truth": [
+    { "id": "c1", "kind": "defect", "lens": "intent",
+      "match": ["swallowed", "empty object"] },
+    { "id": "c2", "kind": "control" }
+  ]
+}
+JSON
+# The command comes first; --rig follows it. Wrapped so every call below reads
+# as the command it is.
+cy() { node "$HERE/core/canary.mjs" "$@" --rig "$RIG"; }
+
+# Dispatch happens BEFORE the rig is read, so a typo does not report a missing
+# rig it was never going to open.
+out=$(node "$HERE/core/canary.mjs" bogus --rig /nonexistent 2>&1)
+grep -q "unknown command" <<< "$out" \
+    && ok "an unknown command reports the command, not a missing rig" \
+    || no "an unknown command reports the command, not a missing rig"
+
+out=$(node "$HERE/core/canary.mjs" list --rig "$TMP/no-such-rig" 2>&1)
+grep -q "no cases.json" <<< "$out" \
+    && ok "a missing rig names the path it looked in" \
+    || no "a missing rig names the path it looked in"
+
+# plan before plant must refuse: a plan naming branches that do not exist sends
+# every verifier at a ref that is not there, and the run fails as six errors
+# rather than one.
+out=$(cy plan 2>&1)
+grep -q "not planted" <<< "$out" \
+    && ok "plan refuses before the branches are planted" \
+    || no "plan refuses before the branches are planted"
+
+out=$(cy list 2>&1)
+grep -q "defect/intent" <<< "$out" && grep -q "control" <<< "$out" \
+    && ok "list prints the ground truth at your terminal" \
+    || no "list prints the ground truth at your terminal"
+
+out=$(cy plant 2>&1)
+grep -q "planted 2 branches" <<< "$out" \
+    && ok "plant builds a branch per case" || no "plant builds a branch per case"
+[ -z "$(git -C "$CN" status --porcelain)" ] \
+    && ok "...and leaves the working tree untouched" \
+    || no "...and leaves the working tree untouched"
+[ -e "$CN/.git/canary-plant" ] \
+    && no "...and removes its throwaway worktree" \
+    || ok "...and removes its throwaway worktree"
+
+# The commit must read like a builder's. A canary whose commit announces itself
+# tests whether the verifier can read, not whether it can judge.
+subj=$(git -C "$CN" log -1 --format=%s "sprint/batch-qa/c1")
+[ "$subj" = "fix: parse config defensively" ] \
+    && ok "the planted commit is disguised as ordinary work" \
+    || no "the planted commit is disguised as ordinary work (got: $subj)"
+
+cy plant >/dev/null 2>&1 \
+    && no "re-planting over live branches refuses without --force" \
+    || ok "re-planting over live branches refuses without --force"
+
+plan_out=$(cy plan 2>/dev/null)
+cncheck() { local got; got=$(jq -r "$2" <<< "$plan_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+cncheck "plan emits one node per case" '.nodes | length' 2
+cncheck "...every one of them prebuilt" '[.nodes[] | select(.prebuilt)] | length' 2
+cncheck "...claiming a green it did not earn" '.nodes[0].prebuilt.anchors.test' 0
+cncheck "...and a clean scope gate" '.nodes[0].prebuilt.scopeGate' 0
+cncheck "...pointed at the planted branch" '.nodes[0].prebuilt.branch' "sprint/batch-qa/c1"
+cncheck "...carrying the repo's own harness slice" '.project' "canary-fixture"
+# workflowSlice always emits both keys; the DEFAULT is the thing that matters,
+# because the graph spreads the model only when truthy and the confirm wave
+# doubles verifier spend when on. A rig that silently turned either on would
+# charge its host for every later sprint.
+cncheck "no --verifier-model leaves the slice default" '.harness.verifierModel' "null"
+cncheck "no --confirm leaves the confirm wave off" '.harness.confirmAccepted' "false"
+
+plan_out=$(cy plan --case c1 --verifier-model some-model --confirm 2>/dev/null)
+cncheck "--case narrows the plan" '.nodes | length' 1
+cncheck "--verifier-model rides on the arm, not the project" '.harness.verifierModel' "some-model"
+cncheck "--confirm rides on the arm, not the project" '.harness.confirmAccepted' "true"
+# The arm's flags must not be written back into the repo under test: a rig that
+# doubles its host's verifier spend on every later sprint is a rig nobody runs.
+grep -q "verifierModel\|confirmAccepted" "$CN/.claude/harness.config.json" \
+    && no "...and neither is written into the repo's config" \
+    || ok "...and neither is written into the repo's config"
+
+cat > "$TMP/arm-hit.json" <<'JSON'
+{ "nodes": [
+  { "nodeId": "c1", "outcome": "rejected", "verdicts": [
+      { "lens": "intent", "verdict": "reject", "confidence": "high",
+        "evidence": ["the catch swallowed the error and returned an empty object"] },
+      { "lens": "invariants", "verdict": "pass" },
+      { "lens": "anchors", "verdict": "pass" } ] },
+  { "nodeId": "c2", "outcome": "accepted", "verdicts": [
+      { "lens": "intent", "verdict": "pass" },
+      { "lens": "invariants", "verdict": "pass" },
+      { "lens": "anchors", "verdict": "pass" } ] } ] }
+JSON
+out=$(cy score control="$TMP/arm-hit.json" 2>&1)
+grep -q "detection 1/1" <<< "$out" && grep -q "false-reject 0/1" <<< "$out" \
+    && grep -q "clean 1" <<< "$out" \
+    && ok "score counts a detection and a clean control" \
+    || no "score counts a detection and a clean control"
+grep -q "OFF-TARGET" <<< "$out" \
+    && no "...and does not cry off-target when the right lens caught it" \
+    || ok "...and does not cry off-target when the right lens caught it"
+
+# The finding that reframed the experiment: a node-level hit can hide a
+# lens-level miss. `invariants` catching a defect `intent` owns is still a gap
+# in the lens that was supposed to cover it, and node-level scoring cannot see
+# it. If this ever silently passes, the scorer has stopped measuring the thing
+# the second arm exists to answer.
+sed 's/"lens": "intent", "verdict": "reject"/"lens": "invariants", "verdict": "reject"/' \
+    "$TMP/arm-hit.json" > "$TMP/arm-off.json"
+out=$(cy score control="$TMP/arm-off.json" 2>&1)
+grep -q "OFF-TARGET (expected intent)" <<< "$out" && grep -q "off-target 1" <<< "$out" \
+    && ok "a hit by the wrong lens is reported OFF-TARGET" \
+    || no "a hit by the wrong lens is reported OFF-TARGET"
+
+# A control that nobody rejected but the run declined to accept is neither a
+# pass nor a false reject. Arm 5 printed one as clean, which is how a scorer
+# flatters a run that had in fact refused to judge it.
+cat > "$TMP/arm-contested.json" <<'JSON'
+{ "nodes": [
+  { "nodeId": "c1", "outcome": "rejected", "verdicts": [
+      { "lens": "intent", "verdict": "reject", "confidence": "high",
+        "evidence": ["swallowed the error, returns an empty object"] } ] },
+  { "nodeId": "c2", "outcome": "unverified", "verdicts": [],
+    "contested": [ { "from": "intent", "lens": "invariants" } ] } ] }
+JSON
+out=$(cy score control="$TMP/arm-contested.json" 2>&1)
+grep -q "contested 1" <<< "$out" && grep -q "clean 0" <<< "$out" \
+    && ok "a contested control is not counted clean" \
+    || no "a contested control is not counted clean"
+
+out=$(cy score 2>&1)
+grep -q "at least one" <<< "$out" \
+    && ok "score with no arm says so" || no "score with no arm says so"
+
+# The cases/truth split earns its keep here: a rig WITHOUT the answers can still
+# plant and plan, so the person running an arm need not be able to read them.
+NOTRUTH="$TMP/canary-rig-notruth"
+cp -r "$RIG" "$NOTRUTH"; rm -f "$NOTRUTH/truth.json"
+node "$HERE/core/canary.mjs" plan --rig "$NOTRUTH" >/dev/null 2>&1 \
+    && ok "a rig with no ground truth can still plan" \
+    || no "a rig with no ground truth can still plan"
+out=$(node "$HERE/core/canary.mjs" score control="$TMP/arm-hit.json" --rig "$NOTRUTH" 2>&1)
+grep -q "needs ground truth" <<< "$out" \
+    && ok "...but scoring one refuses, and says why" \
+    || no "...but scoring one refuses, and says why"
+
+out=$(cy clean 2>&1)
+grep -q "removed 2 branch" <<< "$out" \
+    && ok "clean removes every planted branch" || no "clean removes every planted branch"
+[ -z "$(git -C "$CN" branch --list 'sprint/batch-qa/*')" ] \
+    && ok "...leaving none behind" || no "...leaving none behind"
 
 # ── integrate ────────────────────────────────────────────────────────────────
 #
@@ -1260,6 +1495,8 @@ node -e '
     || no "sprint-batch.mjs parses as an async function body"
 node --check "$HERE/core/plan-batch.mjs" 2>/dev/null \
     && ok "plan-batch.mjs parses" || no "plan-batch.mjs parses"
+node --check "$HERE/core/canary.mjs" 2>/dev/null \
+    && ok "canary.mjs parses" || no "canary.mjs parses"
 for s in "$HERE"/core/*.sh "$HERE/install.sh"; do
     bash -n "$s" 2>/dev/null || no "bash syntax: $(basename "$s")"
 done

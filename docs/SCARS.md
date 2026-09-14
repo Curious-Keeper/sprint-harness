@@ -751,13 +751,33 @@ input correctly. It does **not** show the lenses detect anything. A verifier tha
 rubber-stamps everything emits `pass` verdicts that this fixture would happily
 classify as `accepted`. The portable kit's headline result — 10 of 10 nodes
 accepted first pass, zero rejects — is consistent with three working lenses and
-equally consistent with three that are not looking. **A live canary node, with a
-deliberately wrong change in it, has not yet been run through this kit.** Until
-one produces a reject, the verify half of the diamond is an architecture diagram.
+equally consistent with three that are not looking.
+
+**The second instrument, and what it found.** `core/canary.mjs` plants known
+defects on branches, emits them as `prebuilt` nodes so no builder runs, and
+scores the verdicts against ground truth. The lenses do reject: across the arms
+run 2026-09-11 to 2026-09-13, detection ran 3/4 to 4/4 with 0/2 false rejects on
+clean controls. So the verify half is no longer an architecture diagram — but the
+rig moved the gap rather than closing it. **Two runs identical in every respect
+disagreed on a real defect**, and the second accepted the node, which makes
+run-to-run variance inside one model a larger effect than any systematic blind
+spot. It also caught two things node-level scoring hides: a defect caught by a
+lens that does not own it is a lens-level miss inside a node-level hit
+(`off-target`), and a lens that names a defect in another lens's territory files
+it under `couldNotVerify`, which gates nothing.
+
+**The rig is not in this repo, and that is the point.** An early arm caught a
+verifier grepping the ground-truth manifest out of the working tree it was
+launched from. The tool ships in `core/`; the cases, the patches and the answers
+live in a rig directory outside every repo under test, and `install.sh` is the
+one place that knows `canary.mjs` must not be copied in with the rest of `core/`.
+Gitignoring is not enough — an ignored file is still greppable.
 
 **Where it lives.** The `──REDUCE-BEGIN──`/`──REDUCE-END──` markers in
 `core/sprint-batch.mjs`, `core/reduce-fixture.mjs`, and the `── reduce ──` block
-in `selftest.sh`.
+in `selftest.sh`. The canary is `core/canary.mjs`, the exclusion is in
+`install.sh`, and both are asserted by the `── canary rig ──` block in
+`selftest.sh`.
 
 ---
 
@@ -1372,11 +1392,109 @@ It only contests a lens that PASSED. If that lens already rejected, the finding
 landed and repeating it spends the operator's attention for nothing — scar #17.
 
 `couldNotVerify` keeps its original, narrower job: questions a lens asks about its
-OWN territory and could not answer. On an accepted node it now warns, but it does
-not block. The prompt asks verifiers to use it, so blocking would fire on the
-state the prompt recommends — scar #17 again, from the other direction.
+OWN territory and could not answer. It neither blocks nor warns. Blocking would
+fire on the state the prompt recommends, since the prompt asks every verifier to
+record what it could not reach — scar #17 from the other direction.
+
+It shipped with a WARNING for one day, on the argument that a warning was the safe
+half of that trade. The next live batch priced it: the warning fired on 6 of 6
+accepted nodes, 4-5 entries each, because every verifier does what the prompt
+asks. A line that appears on 100% of the success state carries no information and
+spends the attention the CONTESTED LENS line needs. The field still reaches the
+report per node, which is where an operator can act on it.
+
+**What the first live run corrected.** The rule fired on its first real batch and
+worked: `crossLens` was used five times across all three lenses, and the contested
+entry was the sharpest line in the report — one lens explaining why another lens's
+green anchors bound nothing. The WARNING was wrong, though. It closed with "This
+is UNVERIFIED, not rejected" on a node two other lenses had already rejected, so
+it described a state the node was not in.
+
+A contested node is only unverified when nothing else rejected it. The sentence is
+now conditional, and when the node is rejected anyway the warning says so and
+reframes itself as a finding about the lens that passed. Both branches were then
+exercised on the next live batch, one node each.
+
+That batch also produced the rule's best evidence so far: a lens contested a
+KNOWN-GOOD control and was right. The node routed a handler through a JSON helper
+as asked, and `json.NewEncoder().Encode` appends a trailing newline, so the
+response body changed by one byte that the item never mentioned. Four earlier
+batches had accepted that node. The lens that noticed did not own the question,
+which is precisely why it had nowhere to put the finding before `crossLens`. Scar #17 does not only
+cover checks that fire on the success state; it covers any check whose text the
+operator can discover is false, because that is the same lesson — the line stops
+being read.
 
 **Where it lives.** `VERDICT_SCHEMA` and the CONTESTED LENS block of the reduce in
-`core/sprint-batch.mjs`; cases in `core/reduce-fixture.mjs`; four mutations in the
+`core/sprint-batch.mjs`; cases in `core/reduce-fixture.mjs`; five mutations in the
 `── reduce ──` block of `selftest.sh`; the contract in
 `templates/sprint-verifier.md`.
+
+
+---
+
+## 38. Two identical verification runs disagreed about a real defect
+
+**What happened.** A control arm was re-run against the same planted defects:
+same model, same prompts, same branches, same commits, nothing changed but the
+clock. One defect was caught by the `intent` lens in the first run and passed by
+ALL THREE lenses in the repeat. The node was accepted.
+
+A third arm on a different model caught it through `invariants` — which for a
+while looked like evidence that the second model was better at that lens. The
+repeat showed it was not: the spread between two runs of ONE model is at least as
+large as the spread between two models. Any claim about a model being better at a
+lens, made from one arm each, is confounded.
+
+**Why it was dangerous.** Not because a defect escaped once — because of what it
+implies about every green batch. If a complete, all-lenses-passed acceptance is a
+single sample of a noisy process, then "3 lenses, 0 rejects" is not the strong
+statement it reads as, and nothing in the report distinguishes a node that is
+clean from a node that happened to be looked at badly.
+
+It also pointed the cheapest fix in the wrong direction. The instinct was a second
+PROVIDER, to decorrelate systematic blind spots. The data says the dominant
+failure mode is not a blind spot, it is variance — and variance is answered by
+repetition, which needs no second vendor, no adapter, and no new prompt.
+
+**The numbers.** Four arms against a rig of planted defects and known-good
+controls:
+
+- single run: 11 of 12 defects caught (92%)
+- every pairwise union of two runs: 12 of 12 (100%)
+- false rejects: 0 in 12 control-node judgements, including two controls that
+  change behaviour and carry their own tests
+
+The union costs no precision ONLY because rejects are precise. That is the load-
+bearing measurement, and it is the one to re-take before trusting this further:
+if rejects ever start carrying false positives, a second pass manufactures them at
+twice the rate.
+
+**The fix.** `verify.confirmAccepted`, DEFAULT OFF because it doubles verifier
+spend. Nodes the first pass accepted are re-verified with fresh contexts and the
+identical prompts; a reject in either pass fails the node. Only accepted nodes:
+everything else is already not merging.
+
+A verifier that dies in the confirm pass leaves the node ACCEPTED, with a warning.
+The node already cleared a complete first pass, and failing it for a flaky second
+opinion would mean switching confirmation on makes good work fail at random —
+which is how a mechanism gets switched back off and never trusted again.
+
+**What the first live run showed, and what it did not.** The wave dispatches: 15
+confirm verifiers ran over the five accepted nodes of a seven-node batch, each
+returned a full set of lenses, and the re-reduce produced a coherent report.
+`confirmRan` read 3 on confirmed nodes and `null` on the two that were never
+confirmed, so "ran and returned nothing" stayed distinct from "never ran" outside
+the fixture too.
+
+It has still never CAUGHT anything. The only defect in that batch was rejected by
+the first pass, so it was never re-verified — confirmation runs on accepted nodes
+by definition. Its detection value rests on the union measurement above, not on
+anything observed in a live wave. Seeing it catch something requires a defect the
+first pass accepts, which is the variance case that cannot be summoned on demand.
+Do not upgrade "it runs" to "it works" in any summary of this.
+
+**Where it lives.** `verify.confirmAccepted` in `harness.config.schema.json` and
+`core/lib/config.mjs`; the CONFIRM WAVE block after the first reduce and the
+confirm handling inside it in `core/sprint-batch.mjs`; five cases in
+`core/reduce-fixture.mjs`; three mutations in `selftest.sh`.

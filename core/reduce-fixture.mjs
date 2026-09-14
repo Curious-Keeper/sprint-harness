@@ -293,6 +293,26 @@ const hasWarning = (r, re) => r.warnings.some((w) => new RegExp(re).test(w));
     t("...and does not warn twice", hasWarning(r, "CONTESTED LENS"), false);
 }
 
+// A contested node that ANOTHER lens rejected is `rejected`, not `unverified`,
+// and the warning must not say otherwise. The first live run of the contested
+// rule produced exactly this shape — two lenses rejecting, a third passing what
+// it owned — and the warning claimed the node was unverified.
+{
+    const n = node("contestedandrejected");
+    const verdicts = [
+        verdict("intent", { verdict: "reject", evidence: ["the item asked for a tidy, this removes a guard"] }),
+        verdict("invariants", { crossLens: [{ lens: "anchors", concern: "green binds nothing here" }] }),
+        verdict("anchors"),
+    ];
+    const r = run([{ node: n, build: build(), verdicts }]);
+    t("a contested node another lens rejected is rejected", r.nodes[0].outcome, "rejected");
+    t("the contest is still reported", hasWarning(r, "CONTESTED LENS"), true);
+    t("the warning does NOT call a rejected node unverified",
+        hasWarning(r, "UNVERIFIED, not rejected"), false);
+    t("...it says the merge decision is unchanged",
+        hasWarning(r, "changes no merge decision"), true);
+}
+
 // A concern naming a lens that never returned adds nothing: the node is already
 // unverified for the missing lens, and there is no verdict to contest.
 {
@@ -315,9 +335,11 @@ const hasWarning = (r, re) => r.warnings.some((w) => new RegExp(re).test(w));
     t("an empty crossLens produces no warnings", r.warnings, []);
 }
 
-// `couldNotVerify` WARNS but does not block — it is scoped by the prompt to a
-// lens's OWN questions, and an honest "could not reach this" is what the prompt
-// asks for. Blocking would fire on the recommended state (scar #17).
+// `couldNotVerify` neither blocks NOR warns. The prompt asks every verifier to
+// record what it could not reach, and every verifier does: on a live batch the
+// warning this once produced fired on 6 of 6 accepted nodes. A line on 100% of
+// the success state is scar #17 with numbers attached. The field still reaches
+// the report, which is where it is usable.
 {
     const n = node("unanswered");
     const verdicts = [
@@ -326,9 +348,79 @@ const hasWarning = (r, re) => r.warnings.some((w) => new RegExp(re).test(w));
     ];
     const r = run([{ node: n, build: build(), verdicts }]);
     t("couldNotVerify does NOT block acceptance", r.accepted, ["unanswered"]);
-    t("couldNotVerify still warns", hasWarning(r, "unanswered question"), true);
-    t("...and says what accepted means", hasWarning(r, "not that every"), true);
+    t("couldNotVerify does not warn either", r.warnings, []);
     t("the entries reach the report", r.nodes[0].couldNotVerify, ["could not reach the staging config"]);
+}
+
+// ── confirm pass ─────────────────────────────────────────────────────────────
+//
+// A second verification wave over nodes the first pass accepted. A reject in
+// EITHER pass fails the node; an incomplete confirm pass does not.
+
+// No confirm pass at all: nothing changes, and the node reports null rather
+// than 0 — "not run" is not "ran and returned nothing".
+{
+    const n = node("noconfirm");
+    const r = run([{ node: n, build: build(), verdicts: allPass() }]);
+    t("a node with no confirm pass is accepted as before", r.accepted, ["noconfirm"]);
+    t("confirmRan is null, not 0, when no pass ran", r.nodes[0].confirmRan, null);
+    t("a node with no confirm pass warns nothing", r.warnings, []);
+}
+
+// A clean confirm pass leaves the node accepted and says nothing.
+{
+    const n = node("confirmed");
+    const r = run([{ node: n, build: build(), verdicts: allPass(), confirm: { verdicts: allPass() } }]);
+    t("a clean confirm pass keeps the node accepted", r.accepted, ["confirmed"]);
+    t("a clean confirm pass reports its count", r.nodes[0].confirmRan, 3);
+    t("a clean confirm pass warns nothing", r.warnings, []);
+}
+
+// CANARY: the whole point. The first pass accepted it and the second caught it.
+{
+    const n = node("missedfirst");
+    const confirm = [
+        verdict("intent"),
+        verdict("invariants", { verdict: "reject", evidence: ["the ceiling moved by one"] }),
+        verdict("anchors"),
+    ];
+    const r = run([{ node: n, build: build(), verdicts: allPass(), confirm: { verdicts: confirm } }]);
+    t("a confirm-pass reject fails the node", r.rejected, ["missedfirst"]);
+    t("...and it is not also accepted", r.accepted, []);
+    t("...and it is rejected, not unverified", r.nodes[0].outcome, "rejected");
+    t("the confirm reject is named in the report",
+        r.nodes[0].confirmRejects.map((x) => x.lens), ["invariants"]);
+    t("the warning says the confirm pass caught it", hasWarning(r, "THE CONFIRM PASS CAUGHT THIS"), true);
+    t("...and carries the evidence", hasWarning(r, "the ceiling moved by one"), true);
+}
+
+// BEST EFFORT: a verifier died in the confirm pass. The node already cleared a
+// COMPLETE first pass, so it stays accepted — otherwise switching confirmation
+// on makes good work fail at random, and it gets switched straight back off.
+{
+    const n = node("flakyconfirm");
+    const r = run([{
+        node: n, build: build(), verdicts: allPass(),
+        confirm: { verdicts: [verdict("intent"), verdict("anchors")] },
+    }]);
+    t("an incomplete confirm pass does NOT fail the node", r.accepted, ["flakyconfirm"]);
+    t("...and the node is still accepted", r.nodes[0].outcome, "accepted");
+    t("...but it says so", hasWarning(r, "confirm pass returned 2/3"), true);
+    t("...and does not claim the node was unjudged",
+        hasWarning(r, "UNVERIFIED, not rejected"), false);
+}
+
+// A confirm pass never rescues a node the FIRST pass rejected: it is not run on
+// one, and a stray one must not outvote a standing reject.
+{
+    const n = node("stillrejected");
+    const verdicts = [
+        verdict("intent", { verdict: "reject", evidence: ["wrong copy"] }),
+        verdict("invariants"), verdict("anchors"),
+    ];
+    const r = run([{ node: n, build: build(), verdicts, confirm: { verdicts: allPass() } }]);
+    t("a clean confirm pass cannot rescue a rejected node", r.rejected, ["stillrejected"]);
+    t("...and it is not accepted", r.accepted, []);
 }
 
 console.error(`reduce-fixture: ${pass} passed, ${fail} failed`);

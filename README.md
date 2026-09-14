@@ -71,6 +71,8 @@ core/                       copied verbatim into a project — never edited
   integrate.sh              wave-order merge + regenerate + anchors on the MERGED tree
   scope-gate.sh             "this node may only touch the files it owns"
   reduce-fixture.mjs        tests the reduce against known-bad results, zero agents
+  canary.mjs                plants known defects and scores what the lenses caught
+                            — the ONE file install.sh does not copy into a project
   preflight.sh              read-only readiness check
   deny-push.sh              PreToolUse hard-deny, fail-closed
   paired-artifact-gate.sh   "changed X must ship changed Y", with an audit trail
@@ -92,6 +94,7 @@ docs/
   MAP_GUIDE.md              how to write the map, with real before/after
   SCARS.md                  ← then this: 19 failures and the guards they produced
   DESIGN.md                 what generalises, what cannot, and known gaps
+  cross-runtime-verifier.md a retracted design, kept for its findings
   PORTING.md                per-step detail, and how to tell if it's working
 ```
 

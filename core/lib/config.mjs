@@ -196,6 +196,11 @@ export function workflowSlice(cfg) {
         // only when truthy, so the default path passes no model key at all and
         // every verifier inherits the main loop exactly as before.
         verifierModel: cfg.verify.model ?? null,
+        // OPTIONAL, DEFAULT OFF, and it DOUBLES the verifier spend when on.
+        // `=== true` rather than `!== false`, because a mechanism that costs a
+        // second full verification wave must be switched on deliberately and
+        // never arrive through a typo or a missing key.
+        confirmAccepted: cfg.verify.confirmAccepted === true,
         agents: cfg.agents,
         branchPrefix: cfg.branchPrefix,
         mainBranch: cfg.project.mainBranch,

@@ -208,6 +208,11 @@
                 "model": {
                     "type": "string",
                     "description": "OPTIONAL, and normally unset. Pins every verifier to one model instead of inheriting the main loop. The prompts are unchanged either way, so the only variable is the model -- which is what makes a second opinion measurable rather than anecdotal. A slug here rots faster than anything else in this file; leave it out unless you are deliberately running a comparison, and never let it silently become the default."
+                },
+                "confirmAccepted": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "OPTIONAL, DEFAULT OFF, and it DOUBLES the verifier spend. Re-verifies every node the FIRST pass accepted, with fresh contexts and the same lenses, and a reject in either pass fails the node. It buys detection, not precision. Measured over four arms on a rig of planted defects: one run caught 11 of 12, while every pairwise union of two runs caught 12 of 12 -- and the union costs nothing because rejects were precise, 0 false rejects across 12 control-node judgements. A lens that crashes in the CONFIRM pass leaves the node accepted with a warning: the first pass already met the bar, and a flaky second pass must not fail good work."
                 }
             }
         },
