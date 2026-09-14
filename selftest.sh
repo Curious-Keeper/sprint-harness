@@ -966,6 +966,63 @@ grep -q "contested 1" <<< "$out" && grep -q "clean 0" <<< "$out" \
     && ok "a contested control is not counted clean" \
     || no "a contested control is not counted clean"
 
+# The mirror of the case above, on the defect side. A DEFECT nobody rejected but
+# the contested guard refused to accept is not a miss: `missed` is the row that
+# says the defect shipped, and this one did not. Nor is it a detection — no lens
+# rejected, so the match rules never ran on a verdict. Arm 6's k2 was exactly
+# this and scored as a miss on a run where nothing merged, which understated the
+# guard the run existed to measure.
+cat > "$TMP/arm-held.json" <<'JSON'
+{ "nodes": [
+  { "nodeId": "c1", "outcome": "unverified", "verdicts": [
+      { "lens": "intent", "verdict": "pass" },
+      { "lens": "invariants", "verdict": "pass" },
+      { "lens": "anchors", "verdict": "pass" } ],
+    "contested": [ { "from": "anchors", "lens": "intent",
+      "concern": "the catch swallowed the error and returns an empty object" } ] },
+  { "nodeId": "c2", "outcome": "accepted", "verdicts": [
+      { "lens": "intent", "verdict": "pass" } ] } ] }
+JSON
+out=$(cy score control="$TMP/arm-held.json" 2>&1)
+grep -q "contested-hold 1" <<< "$out" && grep -q "missed 0" <<< "$out" \
+    && grep -q "detection 0/1" <<< "$out" \
+    && ok "a defect held by a contested lens is neither missed nor detected" \
+    || no "a defect held by a contested lens is neither missed nor detected"
+# The advisory marker, which must never become a detection. A held concern that
+# names the defect is the difference between a guard that worked and a lucky
+# block, and a human reads the row to tell them apart.
+grep -q "CONCERN NAMES THE DEFECT" <<< "$out" \
+    && ok "...and says whether the concern actually named the defect" \
+    || no "...and says whether the concern actually named the defect"
+sed 's/the catch swallowed the error and returns an empty object/a wider diff than asked/' \
+    "$TMP/arm-held.json" > "$TMP/arm-held-nomatch.json"
+out=$(cy score control="$TMP/arm-held-nomatch.json" 2>&1)
+grep -q "contested-hold 1" <<< "$out" \
+    && ! grep -q "CONCERN NAMES THE DEFECT" <<< "$out" \
+    && ok "...and does not claim it did when the concern is unrelated" \
+    || no "...and does not claim it did when the concern is unrelated"
+# A held defect must not be reported as one that would have shipped.
+out=$(cy score a="$TMP/arm-held.json" b="$TMP/arm-held.json" 2>&1)
+grep -q "held, unmerged, by a, b" <<< "$out" \
+    && ok "a held defect is not printed as a bare NOBODY found it" \
+    || no "a held defect is not printed as a bare NOBODY found it"
+
+# `missed` must still mean the defect was ACCEPTED, or the row above is cosmetic
+# — it would just be a second name for the same number.
+cat > "$TMP/arm-shipped.json" <<'JSON'
+{ "nodes": [
+  { "nodeId": "c1", "outcome": "accepted", "verdicts": [
+      { "lens": "intent", "verdict": "pass" },
+      { "lens": "invariants", "verdict": "pass" },
+      { "lens": "anchors", "verdict": "pass" } ] },
+  { "nodeId": "c2", "outcome": "accepted", "verdicts": [
+      { "lens": "intent", "verdict": "pass" } ] } ] }
+JSON
+out=$(cy score control="$TMP/arm-shipped.json" 2>&1)
+grep -q "missed 1" <<< "$out" && grep -q "contested-hold 0" <<< "$out" \
+    && ok "a defect that was accepted is still counted missed" \
+    || no "a defect that was accepted is still counted missed"
+
 out=$(cy score 2>&1)
 grep -q "at least one" <<< "$out" \
     && ok "score with no arm says so" || no "score with no arm says so"
