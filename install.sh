@@ -43,6 +43,16 @@ mkdir -p "$ROOT/.claude/"{work,agents,hooks,skills/sprint}
 rm -rf "$ROOT/.claude/harness-core"
 cp -r "$HERE/core" "$ROOT/.claude/harness-core"
 chmod +x "$ROOT/.claude/harness-core"/*.sh
+
+# The ONE exception to "core/ is copied verbatim", and it is deliberate.
+# core/canary.mjs plants known defects on branches a verifier is then asked to
+# judge, and it names the rig directory holding the ground truth. Installed, it
+# would sit in a tree the verifier can read: the 2026-09-11 control arm caught a
+# verifier grepping the ground-truth manifest out of the working tree it was
+# launched from, which is exactly how a canary stops measuring anything. The
+# tool runs from this clone, against a rig outside every repo under test.
+rm -f "$ROOT/.claude/harness-core/canary.mjs"
+
 echo "  ✓ .claude/harness-core/   (overwritten — do not edit; re-run to update)"
 
 # The hook and the gate are referenced by path from settings.json and from
