@@ -59,3 +59,11 @@ Do not put secrets in this file. Reference environment variables instead:
 The global catalog says what this machine can run. The project config says what roles this project wants.
 
 Set `SPRINT_HARNESS_MODELS` to point at another catalog during tests or local experiments. A concrete model slug in project config must appear in the catalog. The aliases `auto` and `inherit-parent` do not require a catalog entry, because they leave model choice to the host session.
+
+Check the active project with:
+
+```sh
+node .claude/harness-core/models.mjs status
+```
+
+The status command prints the model slug, provider, and environment variable name for each configured role. It reports whether each environment variable is set. It never prints secret values.

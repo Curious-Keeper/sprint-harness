@@ -217,6 +217,16 @@ grep -q 'providers.anthropic.apiKey is forbidden; use apiKeyEnv' <<< "$out" \
     && ok "refuses secrets in the global model catalog" \
     || no "refuses secrets in the global model catalog"
 
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node "$HERE/core/models.mjs" status --json 2>&1); rc=$?
+[[ "$rc" -eq 1 && "$out" == *'"ok": false'* && "$out" == *'"apiKeyEnv": "ANTHROPIC_API_KEY"'* && "$out" == *'"env": "missing"'* ]] \
+    && ok "model status reports missing provider environment variables" \
+    || no "model status reports missing provider environment variables ($out)"
+
+out=$(ANTHROPIC_API_KEY=x OPENAI_API_KEY=y SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node "$HERE/core/models.mjs" status --json 2>&1); rc=$?
+[[ "$rc" -eq 0 && "$out" == *'"ok": true'* && "$out" == *'"env": "set"'* && "$out" != *'"ANTHROPIC_API_KEY":"x"'* ]] \
+    && ok "model status checks env presence without printing secrets" \
+    || no "model status checks env presence without printing secrets ($out)"
+
 # THE SCHEMA AND THE LOADER CAN DRIFT, and the kit says so as a known gap:
 # validate() is hand-written and nothing checked it against the JSON schema. This
 # does not do full validation (no ajv dependency), but it catches the class that
@@ -1657,6 +1667,8 @@ node -e '
     || no "sprint-batch.mjs parses as an async function body"
 node --check "$HERE/core/plan-batch.mjs" 2>/dev/null \
     && ok "plan-batch.mjs parses" || no "plan-batch.mjs parses"
+node --check "$HERE/core/models.mjs" 2>/dev/null \
+    && ok "models.mjs parses" || no "models.mjs parses"
 node --check "$HERE/core/canary.mjs" 2>/dev/null \
     && ok "canary.mjs parses" || no "canary.mjs parses"
 for s in "$HERE"/core/*.sh "$HERE/install.sh"; do
