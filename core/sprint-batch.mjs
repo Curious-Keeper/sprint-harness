@@ -527,6 +527,7 @@ const results = await pipeline(
             agentType: H.agents.builder,
             isolation: 'worktree',
             schema: BUILD_SCHEMA,
+            ...(H.builderModel ? { model: H.builderModel } : {}),
         })),
 
     // VERIFY — fresh skeptics asking DIFFERENT questions. N distinct lenses

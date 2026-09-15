@@ -18,6 +18,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
+import { loadModelCatalog, resolveModel, resolveRole, reviewerRoster } from "./models.mjs";
 
 export function repoRoot(from = process.cwd()) {
     try {
@@ -212,6 +213,11 @@ function validate(cfg) {
 // tool-call boundary that has mangled smart quotes and raw angle brackets
 // before.
 export function workflowSlice(cfg) {
+    const catalog = loadModelCatalog();
+    const builderRole = resolveRole(cfg, "builder", { catalog });
+    const verifierRole = cfg.verify.model
+        ? resolveModel(cfg.verify.model, catalog, "verify.model")
+        : resolveRole(cfg, "verifier", { catalog });
     return {
         anchors: cfg.anchors.map((a) => ({
             id: a.id,
@@ -229,7 +235,9 @@ export function workflowSlice(cfg) {
         // OPTIONAL. Null unless a project pins one, and the graph spreads it
         // only when truthy, so the default path passes no model key at all and
         // every verifier inherits the main loop exactly as before.
-        verifierModel: cfg.verify.model ?? null,
+        builderModel: builderRole?.model ?? null,
+        verifierModel: verifierRole?.model ?? null,
+        reviewers: reviewerRoster(cfg, { catalog }),
         // OPTIONAL, DEFAULT OFF, and it DOUBLES the verifier spend when on.
         // `=== true` rather than `!== false`, because a mechanism that costs a
         // second full verification wave must be switched on deliberately and

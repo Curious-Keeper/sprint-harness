@@ -181,6 +181,42 @@ grep -q 'interrogate.reviewers must be an array' <<< "$out" \
     && ok "refuses a non-array interrogate reviewer roster" \
     || no "refuses a non-array interrogate reviewer roster"
 
+cat > "$TMP/model-catalog.json" <<JSON
+{"providers":{"anthropic":{"apiKeyEnv":"ANTHROPIC_API_KEY"},"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},"models":{"claude-opus-5":{"provider":"anthropic"},"gpt-5.6":{"provider":"openai"}}}
+JSON
+cat > "$TMP/model-roles.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"builder":"claude-opus-5","verifier":"gpt-5.6","reviewer":["claude-opus-5","auto"]}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>{const c=m.loadConfig(); console.log(JSON.stringify(m.workflowSlice(c)))})' 2>&1)
+[[ "$out" == *'"builderModel":"claude-opus-5"'* && "$out" == *'"verifierModel":"gpt-5.6"'* && "$out" == *'"reviewers":[{"label":"Reviewer A","model":"claude-opus-5"'* && "$out" == *'{"label":"Reviewer B","model":null'* ]] \
+    && ok "resolves model roles through the global catalog" \
+    || no "resolves model roles through the global catalog ($out)"
+
+cat > "$TMP/model-unknown.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"builder":"missing-model"}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-unknown.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.workflowSlice(m.loadConfig()))' 2>&1)
+grep -q 'models.roles.builder names unknown model "missing-model"' <<< "$out" \
+    && ok "refuses a model role that is absent from the catalog" \
+    || no "refuses a model role that is absent from the catalog"
+
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/no-model-catalog.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.workflowSlice(m.loadConfig()))' 2>&1)
+grep -q 'models.roles.builder names "claude-opus-5", but no model catalog exists' <<< "$out" \
+    && ok "refuses a concrete model role with no catalog" \
+    || no "refuses a concrete model role with no catalog"
+
+cat > "$TMP/model-secret.json" <<JSON
+{"providers":{"anthropic":{"apiKey":"secret"}},"models":{"claude-opus-5":{"provider":"anthropic"}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-secret.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.workflowSlice(m.loadConfig()))' 2>&1)
+grep -q 'providers.anthropic.apiKey is forbidden; use apiKeyEnv' <<< "$out" \
+    && ok "refuses secrets in the global model catalog" \
+    || no "refuses secrets in the global model catalog"
+
 # THE SCHEMA AND THE LOADER CAN DRIFT, and the kit says so as a known gap:
 # validate() is hand-written and nothing checked it against the JSON schema. This
 # does not do full validation (no ajv dependency), but it catches the class that
@@ -795,6 +831,7 @@ const harness = {
     branchPrefix: "sprint", mainBranch: "main",
     scopeGate: ".claude/harness-core/scope-gate.sh", pairedArtifacts: [],
     ...(process.argv[3] ? { verifierModel: process.argv[3] } : {}),
+    ...(process.argv[4] ? { builderModel: process.argv[4] } : {}),
 };
 const node = (id, extra = {}) => ({ nodeId: id, wave: 0, reason: "r", serial: false, files: ["web/a.tsx"],
     items: [{ id: "x1", title: "t", source: "s", severity: "high", files: ["web/a.tsx"], newFiles: [], detail: "d" }], ...extra });
@@ -831,6 +868,11 @@ pbmcheck() { local got; got=$(jq -r "$2" <<< "$pbm_out" 2>/dev/null)
     [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
 pbmcheck "verify.model reaches every verifier" '.verifyModels' "some-model"
 pbmcheck "...and never reaches a builder" '.buildModels' "absent"
+pbb_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" "" builder-model 2>&1)
+pbbcheck() { local got; got=$(jq -r "$2" <<< "$pbb_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pbbcheck "models.roles.builder reaches the builder" '.buildModels' "builder-model"
+pbbcheck "...and never reaches a verifier" '.verifyModels' "absent"
 # The claimed anchors must survive UNVALIDATED, or a canary cannot claim a green
 # it did not earn and the claimed-vs-observed check has nothing to catch.
 pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0
