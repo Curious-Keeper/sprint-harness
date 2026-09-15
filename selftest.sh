@@ -145,6 +145,42 @@ grep -q '\["test"\]' <<< "$out" \
     && ok "workflowSlice carries anchors to the graph" \
     || no "workflowSlice carries anchors to the graph"
 
+cat > "$TMP/models-ok.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"builder":"inherit-parent","reviewer":["claude-opus-5","gpt-5.6"]}},"interrogate":{"reviewers":[{"label":"Reviewer A","model":"claude-opus-5"}]}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/models-ok.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>console.log(JSON.stringify(m.loadConfig().interrogate.reviewers)))' 2>&1)
+grep -q 'Reviewer A' <<< "$out" \
+    && ok "loads model roles and interrogate reviewers" \
+    || no "loads model roles and interrogate reviewers ($out)"
+
+cat > "$TMP/models-bad.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"interrogate":{"reviewers":[{"label":"Reviewer A"}]}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/models-bad.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'interrogate.reviewers\[0\] needs label and model' <<< "$out" \
+    && ok "refuses an interrogate reviewer with no model" \
+    || no "refuses an interrogate reviewer with no model"
+
+cat > "$TMP/models-empty-role.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"reviewer":[]}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/models-empty-role.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'models.roles.reviewer must be a model string or a non-empty array of model strings' <<< "$out" \
+    && ok "refuses an empty model role roster" \
+    || no "refuses an empty model role roster"
+
+cat > "$TMP/interrogate-not-array.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"interrogate":{"reviewers":"claude-opus-5"}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/interrogate-not-array.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'interrogate.reviewers must be an array' <<< "$out" \
+    && ok "refuses a non-array interrogate reviewer roster" \
+    || no "refuses a non-array interrogate reviewer roster"
+
 # THE SCHEMA AND THE LOADER CAN DRIFT, and the kit says so as a known gap:
 # validate() is hand-written and nothing checked it against the JSON schema. This
 # does not do full validation (no ajv dependency), but it catches the class that
@@ -178,6 +214,33 @@ console.log(missing.join(",") || "clean");' 2>&1)
 [ "$drift_out" = "clean" ] \
     && ok "every config key the loader defaults is in the schema" \
     || no "every config key the loader defaults is in the schema (missing: $drift_out)"
+
+# ── map dispatchability ──────────────────────────────────────────────────────
+#
+# decisionsOwed must be visible in map state without becoming queue work. This
+# is the core split the board relies on: a human can see the decision, while the
+# extractor never hands it to a builder.
+echo
+echo "── map dispatchability ──"
+dispatch_out=$(node --input-type=module -e '
+const map = {
+  plannedWork: {
+    backlog: [{ n: 1, what: "dispatch me" }],
+    decisionsOwed: { items: [{ id: "dec-1", decision: "choose the API" }] },
+  },
+  openDebt: { high: [{ id: "L#1", summary: "fix me" }], medium: [], low: [] },
+};
+const visible = map.plannedWork.decisionsOwed.items.map((d) => d.id);
+const queue = [];
+for (const sev of ["high", "medium", "low"]) {
+  for (const d of map.openDebt[sev] ?? []) queue.push(d.id);
+}
+for (const w of map.plannedWork.backlog ?? []) queue.push(`pw:${w.n}`);
+console.log(JSON.stringify({ visible, queue }));
+' 2>&1)
+[[ "$dispatch_out" == *'"visible":["dec-1"]'* && "$dispatch_out" == *'"queue":["L#1","pw:1"]'* && "$dispatch_out" != *'"queue":["dec-1"'* ]] \
+    && ok "decisionsOwed stays visible but never enters extracted queue work" \
+    || no "decisionsOwed stays visible but never enters extracted queue work ($dispatch_out)"
 
 # ── file extensions are the partitioner ──────────────────────────────────────
 #

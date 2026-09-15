@@ -68,6 +68,10 @@ const DEFAULTS = {
     lanes: [],
     pairedArtifacts: [],
     verify: { lenses: ["intent", "invariants", "anchors"], requireAllLenses: true },
+    // Model selection is separate from `agents`: agents name the contract to run,
+    // roles name which model/provider choice should fill that contract.
+    models: { roles: {} },
+    interrogate: { reviewers: [] },
     git: {
         denyPush: true,
         denyPushReason: null,
@@ -167,6 +171,36 @@ function validate(cfg) {
     if (!cfg.verify.lenses.length) die("verify.lenses cannot be empty");
     if (new Set(cfg.verify.lenses).size !== cfg.verify.lenses.length) {
         die("verify.lenses must be distinct — duplicate lenses are redundant reviewers, not independent questions");
+    }
+
+    if (!cfg.models || typeof cfg.models !== "object" || Array.isArray(cfg.models)) {
+        die("models must be an object");
+    }
+    if (!cfg.models.roles || typeof cfg.models.roles !== "object" || Array.isArray(cfg.models.roles)) {
+        die("models.roles must be an object");
+    }
+    const roleValue = (where, value) => {
+        if (typeof value === "string") return;
+        if (Array.isArray(value) && value.length && value.every((v) => typeof v === "string")) return;
+        die(`${where} must be a model string or a non-empty array of model strings`);
+    };
+    for (const [role, value] of Object.entries(cfg.models.roles)) {
+        roleValue(`models.roles.${role}`, value);
+    }
+
+    if (!cfg.interrogate || typeof cfg.interrogate !== "object" || Array.isArray(cfg.interrogate)) {
+        die("interrogate must be an object");
+    }
+    if (!Array.isArray(cfg.interrogate.reviewers)) {
+        die("interrogate.reviewers must be an array");
+    }
+    for (const [i, reviewer] of cfg.interrogate.reviewers.entries()) {
+        if (!reviewer?.label || !reviewer?.model) {
+            die(`interrogate.reviewers[${i}] needs label and model`);
+        }
+        if (typeof reviewer.label !== "string" || typeof reviewer.model !== "string") {
+            die(`interrogate.reviewers[${i}] label and model must be strings`);
+        }
     }
 }
 
