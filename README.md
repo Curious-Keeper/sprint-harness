@@ -82,6 +82,7 @@ docs/
   RUNBOOK-SMALL.md          smaller-project path and sizing fork
   MAP_GUIDE.md              how to write dispatchable map entries
   MODELS.md                 model roles, provider catalog, and runners
+  TOOLCHAIN.md              contract shared with appmap-board and skills
   SCARS.md                  38 failures and the guards they produced
   DESIGN.md                 what generalises, what cannot, and known gaps
   PORTING.md                detailed porting notes
@@ -112,6 +113,8 @@ Then follow the runbook:
 - Use [`docs/RUNBOOK-SMALL.md`](docs/RUNBOOK-SMALL.md) for a project with one to
   three surfaces.
 - Use [`templates/prompts/`](templates/prompts/) as the copy-paste session prompts.
+- Use [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md) before changing a map section,
+  config key, or shared term consumed by `appmap-board` or `skills`.
 
 The prompts assume this repo lives at `~/git_projects/sprint-harness`. Adjust the
 paths if you clone it somewhere else.
