@@ -145,6 +145,271 @@ grep -q '\["test"\]' <<< "$out" \
     && ok "workflowSlice carries anchors to the graph" \
     || no "workflowSlice carries anchors to the graph"
 
+cat > "$TMP/models-ok.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"builder":"inherit-parent","reviewer":["claude-opus-5","gpt-5.6"]}},"interrogate":{"reviewers":[{"label":"Reviewer A","model":"claude-opus-5"}]}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/models-ok.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>console.log(JSON.stringify(m.loadConfig().interrogate.reviewers)))' 2>&1)
+grep -q 'Reviewer A' <<< "$out" \
+    && ok "loads model roles and interrogate reviewers" \
+    || no "loads model roles and interrogate reviewers ($out)"
+
+cat > "$TMP/models-bad.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"interrogate":{"reviewers":[{"label":"Reviewer A"}]}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/models-bad.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'interrogate.reviewers\[0\] needs label and model' <<< "$out" \
+    && ok "refuses an interrogate reviewer with no model" \
+    || no "refuses an interrogate reviewer with no model"
+
+cat > "$TMP/models-empty-role.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"reviewer":[]}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/models-empty-role.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'models.roles.reviewer must be a model string or a non-empty array of model strings' <<< "$out" \
+    && ok "refuses an empty model role roster" \
+    || no "refuses an empty model role roster"
+
+cat > "$TMP/interrogate-not-array.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"interrogate":{"reviewers":"claude-opus-5"}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/interrogate-not-array.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.loadConfig())' 2>&1)
+grep -q 'interrogate.reviewers must be an array' <<< "$out" \
+    && ok "refuses a non-array interrogate reviewer roster" \
+    || no "refuses a non-array interrogate reviewer roster"
+
+cat > "$TMP/model-catalog.json" <<JSON
+{"providers":{"anthropic":{"apiKeyEnv":"ANTHROPIC_API_KEY"},"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},"models":{"claude-opus-5":{"provider":"anthropic"},"gpt-5.6":{"provider":"openai"}}}
+JSON
+cat > "$TMP/model-roles.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"builder":"claude-opus-5","verifier":"gpt-5.6","reviewer":["claude-opus-5","auto"]}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>{const c=m.loadConfig(); console.log(JSON.stringify(m.workflowSlice(c)))})' 2>&1)
+[[ "$out" == *'"builderModel":"claude-opus-5"'* && "$out" == *'"verifierModel":"gpt-5.6"'* && "$out" == *'"reviewers":[{"label":"Reviewer A","model":"claude-opus-5"'* && "$out" == *'{"label":"Reviewer B","model":null'* ]] \
+    && ok "resolves model roles through the global catalog" \
+    || no "resolves model roles through the global catalog ($out)"
+
+cat > "$TMP/model-unknown.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],"models":{"roles":{"builder":"missing-model"}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-unknown.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.workflowSlice(m.loadConfig()))' 2>&1)
+grep -q 'models.roles.builder names unknown model "missing-model"' <<< "$out" \
+    && ok "refuses a model role that is absent from the catalog" \
+    || no "refuses a model role that is absent from the catalog"
+
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/no-model-catalog.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.workflowSlice(m.loadConfig()))' 2>&1)
+grep -q 'models.roles.builder names "claude-opus-5", but no model catalog exists' <<< "$out" \
+    && ok "refuses a concrete model role with no catalog" \
+    || no "refuses a concrete model role with no catalog"
+
+cat > "$TMP/model-secret.json" <<JSON
+{"providers":{"anthropic":{"apiKey":"secret"}},"models":{"claude-opus-5":{"provider":"anthropic"}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-secret.json" node -e \
+    'import("'"$REPO"'/.claude/harness-core/lib/config.mjs").then(m=>m.workflowSlice(m.loadConfig()))' 2>&1)
+grep -q 'providers.anthropic.apiKey is forbidden; use apiKeyEnv' <<< "$out" \
+    && ok "refuses secrets in the global model catalog" \
+    || no "refuses secrets in the global model catalog"
+
+out=$(SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node "$HERE/core/models.mjs" status --json 2>&1); rc=$?
+[[ "$rc" -eq 1 && "$out" == *'"ok": false'* && "$out" == *'"apiKeyEnv": "ANTHROPIC_API_KEY"'* && "$out" == *'"env": "missing"'* ]] \
+    && ok "model status reports missing provider environment variables" \
+    || no "model status reports missing provider environment variables ($out)"
+
+out=$(ANTHROPIC_API_KEY=x OPENAI_API_KEY=y SPRINT_HARNESS_CONFIG="$TMP/model-roles.json" SPRINT_HARNESS_MODELS="$TMP/model-catalog.json" node "$HERE/core/models.mjs" status --json 2>&1); rc=$?
+[[ "$rc" -eq 0 && "$out" == *'"ok": true'* && "$out" == *'"env": "set"'* && "$out" != *'"ANTHROPIC_API_KEY":"x"'* ]] \
+    && ok "model status checks env presence without printing secrets" \
+    || no "model status checks env presence without printing secrets ($out)"
+
+# DISPATCH. models.mjs answers "does this machine know the name"; dispatch.mjs
+# answers "can anything here REACH it". The two were one question for a while,
+# and the gap was invisible: a roster resolved three vendors cleanly and the
+# caller could only spawn one of them, so the run silently became single-vendor.
+# Every assertion below is about the reachability verdict, not the name.
+mkdir -p "$TMP/fakebin"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/fakebin/fake-runner"
+chmod +x "$TMP/fakebin/fake-runner"
+cat > "$TMP/runner-catalog.json" <<JSON
+{"providers":{"anthropic":{"apiKeyEnv":"ANTHROPIC_API_KEY"},"openai":{"apiKeyEnv":"OPENAI_API_KEY"},"xai":{"apiKeyEnv":"XAI_API_KEY"}},
+ "runners":{"fake-runner":{"cmd":"fake-runner","args":["-p","--mode","ask"],"modelFlag":"--model"},
+            "absent-runner":{"cmd":"definitely-not-installed-xyz","args":[]}},
+ "models":{"claude-opus-5":{"provider":"anthropic","runner":"host"},
+           "gpt-5.6":{"provider":"openai","runner":"fake-runner","runnerModel":"vendor-slug-9"},
+           "grok-4.6-fast":{"provider":"xai","runner":"absent-runner"}}}
+JSON
+D="import(\"$REPO/.claude/harness-core/lib/dispatch.mjs\")"
+M="import(\"$REPO/.claude/harness-core/lib/models.mjs\")"
+
+# The runner is handed runnerModel, never the catalog slug. These differ on
+# purpose: the catalog names what the PROJECT asked for and the runner names
+# what the VENDOR calls it today. Passing the wrong one fails at the provider.
+out=$(PATH="$TMP/fakebin:$PATH" node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/runner-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"gpt-5.6\",c)))})" 2>&1)
+[[ "$out" == *'"via":"runner"'* && "$out" == *'"--model","vendor-slug-9"'* && "$out" != *'"--model","gpt-5.6"'* ]] \
+    && ok "dispatch passes the runner its own model slug, not the catalog slug" \
+    || no "dispatch passed the wrong slug to the runner ($out)"
+
+# A runner that is not installed is UNREACHABLE, not quietly downgraded.
+out=$(env -u XAI_API_KEY node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/runner-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"grok-4.6-fast\",c,\"x\",{PATH:\"/nonexistent\"})))})" 2>&1)
+[[ "$out" == *'"via":"unreachable"'* && "$out" == *'"argv":null'* ]] \
+    && ok "dispatch calls a missing runner unreachable" \
+    || no "dispatch did not mark a missing runner unreachable ($out)"
+
+# ...unless the provider key is there, which a direct API caller could use.
+out=$(node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/runner-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"grok-4.6-fast\",c,\"x\",{PATH:\"/nonexistent\",XAI_API_KEY:\"k\"})))})" 2>&1)
+[[ "$out" == *'"via":"apiKey"'* && "$out" != *'"k"'* ]] \
+    && ok "dispatch falls back to a present provider key without printing it" \
+    || no "dispatch mishandled the apiKey fallback ($out)"
+
+# THE WHOLE POINT. An unreachable reviewer must stay in the roster as
+# unreachable. Dropping it hides the degradation; replacing it with a reachable
+# model fakes diversity that is not there, which is the failure this exists to
+# prevent.
+cat > "$TMP/runner-roles.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],
+ "models":{"roles":{"reviewer":["claude-opus-5","gpt-5.6","grok-4.6-fast"]}}}
+JSON
+out=$(PATH="$TMP/fakebin:$PATH" SPRINT_HARNESS_CONFIG="$TMP/runner-roles.json" \
+    SPRINT_HARNESS_MODELS="$TMP/runner-catalog.json" node -e \
+    "Promise.all([$D,import(\"$REPO/.claude/harness-core/lib/config.mjs\")]).then(([d,c])=>{
+     const r=d.rosterDispatch(c.loadConfig(),{env:{PATH:\"$TMP/fakebin\"}});
+     console.log(JSON.stringify({n:r.reviewers.length,u:r.unreachable.map(x=>x.model),v:r.vendors,x:r.crossVendor}))})" 2>&1)
+[[ "$out" == *'"n":3'* && "$out" == *'"u":["grok-4.6-fast"]'* && "$out" == *'"x":true'* ]] \
+    && ok "an unreachable reviewer stays in the roster, marked, never substituted" \
+    || no "roster dropped or substituted an unreachable reviewer ($out)"
+
+# A KEY IS NOT A DISPATCHER. With no runner installed but both keys set, the
+# roster once reported three healthy vendors and an empty unreachable list —
+# nothing could actually run two of them, because this harness ships no API
+# client. crossVendor has to see through that.
+out=$(PATH="$TMP/fakebin:$PATH" SPRINT_HARNESS_CONFIG="$TMP/runner-roles.json" \
+    SPRINT_HARNESS_MODELS="$TMP/runner-catalog.json" node -e \
+    "Promise.all([$D,import(\"$REPO/.claude/harness-core/lib/config.mjs\")]).then(([d,c])=>{
+     const r=d.rosterDispatch(c.loadConfig(),{env:{PATH:\"/nonexistent\",OPENAI_API_KEY:\"k\",XAI_API_KEY:\"k\"}});
+     console.log(JSON.stringify({v:r.vendors,x:r.crossVendor,k:r.keyOnly.map(e=>e.model)}))})" 2>&1)
+[[ "$out" == *'"x":false'* && "$out" == *'"v":["anthropic"]'* && "$out" == *'"k":["gpt-5.6","grok-4.6-fast"]'* ]] \
+    && ok "a bare provider key is reported, but never counted as a reachable vendor" \
+    || no "a bare provider key was counted as reachable ($out)"
+
+# One vendor is a fact the caller must surface, so crossVendor has to go false.
+cat > "$TMP/one-vendor.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],
+ "models":{"roles":{"reviewer":["claude-opus-5"]}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/one-vendor.json" SPRINT_HARNESS_MODELS="$TMP/runner-catalog.json" node -e \
+    "Promise.all([$D,import(\"$REPO/.claude/harness-core/lib/config.mjs\")]).then(([d,c])=>{
+     console.log(JSON.stringify(d.rosterDispatch(c.loadConfig(),{env:{PATH:\"/nonexistent\"}}).crossVendor))})" 2>&1)
+[[ "$out" == "false" ]] \
+    && ok "a single-vendor roster reports crossVendor false" \
+    || no "a single-vendor roster did not report crossVendor false ($out)"
+
+# Catalog guards. A runnerModel with no runner is a config that looks complete
+# and silently passes the catalog slug to nothing.
+cat > "$TMP/bad-runner.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},"models":{"gpt-5.6":{"provider":"openai","runnerModel":"x"}}}
+JSON
+out=$(node -e "$M.then(m=>m.loadModelCatalog(\"$TMP/bad-runner.json\"))" 2>&1)
+grep -q 'runnerModel has no runner to pass it to' <<< "$out" \
+    && ok "refuses a runnerModel with no runner" \
+    || no "refuses a runnerModel with no runner ($out)"
+
+cat > "$TMP/unknown-runner.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},"models":{"gpt-5.6":{"provider":"openai","runner":"nope"}}}
+JSON
+out=$(node -e "$M.then(m=>m.loadModelCatalog(\"$TMP/unknown-runner.json\"))" 2>&1)
+grep -q 'names unknown runner "nope"' <<< "$out" \
+    && ok "refuses a model naming a runner the catalog does not define" \
+    || no "refuses a model naming an undefined runner ($out)"
+
+# BOTH OF THESE WERE FOUND BY A GPT REVIEWER on this module's own first diff,
+# which is the argument for the runner layer existing at all.
+# A file on PATH without the execute bit was reported as a reachable runner and
+# failed with EACCES at spawn — after the roster was already called healthy.
+printf 'not executable\n' > "$TMP/fakebin/fake-runner-noexec"
+chmod 644 "$TMP/fakebin/fake-runner-noexec"
+cat > "$TMP/noexec-catalog.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},
+ "runners":{"noexec":{"cmd":"fake-runner-noexec","args":[]}},
+ "models":{"gpt-5.6":{"provider":"openai","runner":"noexec"}}}
+JSON
+out=$(node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/noexec-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"gpt-5.6\",c,\"x\",{PATH:\"$TMP/fakebin\"})))})" 2>&1)
+[[ "$out" == *'"via":"unreachable"'* ]] \
+    && ok "a PATH file without the execute bit is not a reachable runner" \
+    || no "a non-executable file was reported as a reachable runner ($out)"
+
+# A dangling runner name threw TypeError on a property of undefined instead of
+# naming the bad config.
+out=$(node -e \
+    "$D.then(d=>d.runnerFor(\"m\",{providers:{p:{}},runners:{},models:{m:{provider:\"p\",runner:\"ghost\"}}},\"roster\"))" 2>&1)
+grep -q 'names runner "ghost", which the catalog does not define' <<< "$out" \
+    && ok "a dangling runner name names itself instead of throwing TypeError" \
+    || no "a dangling runner name did not report cleanly ($out)"
+
+# ASKING FOR A MODEL IS NOT GETTING ONE. `pi --provider xai` is accepted,
+# ignored, and answers from openai-codex — so a roster can claim three vendors,
+# run two, and say nothing. That is worse than a short roster because it is
+# invisible. These fixtures are real captured output from that exact trap.
+cat > "$TMP/ran-trap.jsonl" <<'JSONL'
+{"type":"turn_start"}
+not json at all
+{"type":"turn_end","message":{"provider":"openai-codex","model":"gpt-5.5","usage":{"cost":{"total":0.0023}}}}
+{"type":"agent_settled"}
+JSONL
+REP='{"format":"jsonl","event":"turn_end","modelPath":"message.model","providerPath":"message.provider","costPath":"message.usage.cost.total"}'
+out=$(node -e \
+    "Promise.all([$D,import(\"node:fs\")]).then(([d,fs])=>console.log(JSON.stringify(
+     d.ranAs(fs.readFileSync(\"$TMP/ran-trap.jsonl\",\"utf8\"), $REP))))" 2>&1)
+[[ "$out" == *'"provider":"openai-codex"'* && "$out" == *'"model":"gpt-5.5"'* && "$out" == *'"cost":0.0023'* ]] \
+    && ok "ranAs reads back the model a runner actually ran" \
+    || no "ranAs did not read back the real model ($out)"
+
+# Non-JSON lines interleaved with JSONL must not abort the scan — the real
+# runner emits them, and a parse that gives up on the first one reports
+# "did not report" for a runner that did.
+grep -q 'not json at all' "$TMP/ran-trap.jsonl" \
+    && ok "the ranAs fixture really does contain a non-JSON line" \
+    || no "the ranAs fixture lost its non-JSON line"
+
+# A runner that does not report is a BLIND SPOT, and null is how it says so.
+# Returning a guess here would be the silent-reroute bug wearing a hat.
+out=$(node -e "$D.then(d=>console.log(JSON.stringify(d.ranAs('{\"type\":\"turn_end\"}',null))))" 2>&1)
+[[ "$out" == "null" ]] \
+    && ok "ranAs returns null for a runner that reports nothing" \
+    || no "ranAs invented a result for a non-reporting runner ($out)"
+
+# Output with no matching event is also null, not the last line it happened to
+# parse.
+out=$(node -e "$D.then(d=>console.log(JSON.stringify(d.ranAs('{\"type\":\"other\",\"message\":{\"model\":\"x\"}}',$REP))))" 2>&1)
+[[ "$out" == "null" ]] \
+    && ok "ranAs ignores events that are not the reporting event" \
+    || no "ranAs matched the wrong event ($out)"
+
+cat > "$TMP/bad-reports.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},
+ "runners":{"r":{"cmd":"x","args":[],"reports":{"format":"text","event":"e","modelPath":"m","providerPath":"p"}}},
+ "models":{"gpt-5.6":{"provider":"openai","runner":"r"}}}
+JSON
+out=$(node -e "$M.then(m=>m.loadModelCatalog(\"$TMP/bad-reports.json\"))" 2>&1)
+grep -q 'reports.format must be "jsonl"' <<< "$out" \
+    && ok "refuses a reports block in a format ranAs cannot read" \
+    || no "refuses an unreadable reports format ($out)"
+
+node --check "$HERE/core/lib/dispatch.mjs" 2>/dev/null \
+    && ok "dispatch.mjs parses" || no "dispatch.mjs parses"
+
 # THE SCHEMA AND THE LOADER CAN DRIFT, and the kit says so as a known gap:
 # validate() is hand-written and nothing checked it against the JSON schema. This
 # does not do full validation (no ajv dependency), but it catches the class that
@@ -178,6 +443,33 @@ console.log(missing.join(",") || "clean");' 2>&1)
 [ "$drift_out" = "clean" ] \
     && ok "every config key the loader defaults is in the schema" \
     || no "every config key the loader defaults is in the schema (missing: $drift_out)"
+
+# ── map dispatchability ──────────────────────────────────────────────────────
+#
+# decisionsOwed must be visible in map state without becoming queue work. This
+# is the core split the board relies on: a human can see the decision, while the
+# extractor never hands it to a builder.
+echo
+echo "── map dispatchability ──"
+dispatch_out=$(node --input-type=module -e '
+const map = {
+  plannedWork: {
+    backlog: [{ n: 1, what: "dispatch me" }],
+    decisionsOwed: { items: [{ id: "dec-1", decision: "choose the API" }] },
+  },
+  openDebt: { high: [{ id: "L#1", summary: "fix me" }], medium: [], low: [] },
+};
+const visible = map.plannedWork.decisionsOwed.items.map((d) => d.id);
+const queue = [];
+for (const sev of ["high", "medium", "low"]) {
+  for (const d of map.openDebt[sev] ?? []) queue.push(d.id);
+}
+for (const w of map.plannedWork.backlog ?? []) queue.push(`pw:${w.n}`);
+console.log(JSON.stringify({ visible, queue }));
+' 2>&1)
+[[ "$dispatch_out" == *'"visible":["dec-1"]'* && "$dispatch_out" == *'"queue":["L#1","pw:1"]'* && "$dispatch_out" != *'"queue":["dec-1"'* ]] \
+    && ok "decisionsOwed stays visible but never enters extracted queue work" \
+    || no "decisionsOwed stays visible but never enters extracted queue work ($dispatch_out)"
 
 # ── file extensions are the partitioner ──────────────────────────────────────
 #
@@ -732,6 +1024,7 @@ const harness = {
     branchPrefix: "sprint", mainBranch: "main",
     scopeGate: ".claude/harness-core/scope-gate.sh", pairedArtifacts: [],
     ...(process.argv[3] ? { verifierModel: process.argv[3] } : {}),
+    ...(process.argv[4] ? { builderModel: process.argv[4] } : {}),
 };
 const node = (id, extra = {}) => ({ nodeId: id, wave: 0, reason: "r", serial: false, files: ["web/a.tsx"],
     items: [{ id: "x1", title: "t", source: "s", severity: "high", files: ["web/a.tsx"], newFiles: [], detail: "d" }], ...extra });
@@ -768,6 +1061,11 @@ pbmcheck() { local got; got=$(jq -r "$2" <<< "$pbm_out" 2>/dev/null)
     [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
 pbmcheck "verify.model reaches every verifier" '.verifyModels' "some-model"
 pbmcheck "...and never reaches a builder" '.buildModels' "absent"
+pbb_out=$(node "$TMP/prebuilt.mjs" "$REPO/.claude/harness-core/sprint-batch.mjs" "" builder-model 2>&1)
+pbbcheck() { local got; got=$(jq -r "$2" <<< "$pbb_out" 2>/dev/null)
+    [ "$got" = "$3" ] && ok "$1" || no "$1 (got: $got, want: $3)"; }
+pbbcheck "models.roles.builder reaches the builder" '.buildModels' "builder-model"
+pbbcheck "...and never reaches a verifier" '.verifyModels' "absent"
 # The claimed anchors must survive UNVALIDATED, or a canary cannot claim a green
 # it did not earn and the claimed-vs-observed check has nothing to catch.
 pbcheck "a prebuilt node's claimed anchors reach the reduce verbatim" '.claimed' 0
@@ -1552,6 +1850,8 @@ node -e '
     || no "sprint-batch.mjs parses as an async function body"
 node --check "$HERE/core/plan-batch.mjs" 2>/dev/null \
     && ok "plan-batch.mjs parses" || no "plan-batch.mjs parses"
+node --check "$HERE/core/models.mjs" 2>/dev/null \
+    && ok "models.mjs parses" || no "models.mjs parses"
 node --check "$HERE/core/canary.mjs" 2>/dev/null \
     && ok "canary.mjs parses" || no "canary.mjs parses"
 for s in "$HERE"/core/*.sh "$HERE/install.sh"; do

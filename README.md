@@ -78,6 +78,8 @@ core/                       copied verbatim into a project — never edited
   paired-artifact-gate.sh   "changed X must ship changed Y", with an audit trail
   lib/config.mjs            loader; refuses configs that weaken a guarantee
   lib/extract.mjs           citation resolution, state merge, collision report
+  lib/models.mjs            joins role config to the host catalog, never a secret
+  lib/dispatch.mjs          whether anything here can REACH a model, and with what
 
 templates/                  scaffolds you fill in, once per project
   sprint-builder.md         {{REPO_INVARIANTS}} is yours

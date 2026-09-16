@@ -217,6 +217,51 @@
             }
         },
 
+        "models": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Model/provider role defaults for this project. Shape only: model slugs change too quickly for the schema to enumerate them. Strings such as `auto` and `inherit-parent` are allowed by convention and mean the runner should not pin a specific model.",
+            "properties": {
+                "$comment": { "type": "string" },
+                "roles": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": { "type": "string" }
+                            }
+                        ]
+                    },
+                    "description": "Role to model mapping. Single roles use a string (`builder`, `verifier`, `planner`, `scope`, `summarizer`); roster roles such as `reviewer` may use an array. `agents.*` still names the agent contract -- this names only model selection."
+                }
+            }
+        },
+
+        "interrogate": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Multi-model adversarial review settings used by the interrogate workflow skill.",
+            "properties": {
+                "$comment": { "type": "string" },
+                "reviewers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["label", "model"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "label": { "type": "string", "description": "Report label, e.g. Reviewer A." },
+                            "model": { "type": "string", "description": "Model slug, `auto`, or `inherit-parent`. Validated as shape only." }
+                        }
+                    },
+                    "description": "Workflow-specific reviewer roster. When absent or empty, skills may fall back to models.roles.reviewer or their documented defaults."
+                }
+            }
+        },
+
         "git": {
             "type": "object",
             "additionalProperties": false,

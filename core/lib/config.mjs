@@ -18,6 +18,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
+import { loadModelCatalog, resolveModel, resolveRole, reviewerRoster } from "./models.mjs";
 
 export function repoRoot(from = process.cwd()) {
     try {
@@ -68,6 +69,10 @@ const DEFAULTS = {
     lanes: [],
     pairedArtifacts: [],
     verify: { lenses: ["intent", "invariants", "anchors"], requireAllLenses: true },
+    // Model selection is separate from `agents`: agents name the contract to run,
+    // roles name which model/provider choice should fill that contract.
+    models: { roles: {} },
+    interrogate: { reviewers: [] },
     git: {
         denyPush: true,
         denyPushReason: null,
@@ -168,6 +173,36 @@ function validate(cfg) {
     if (new Set(cfg.verify.lenses).size !== cfg.verify.lenses.length) {
         die("verify.lenses must be distinct — duplicate lenses are redundant reviewers, not independent questions");
     }
+
+    if (!cfg.models || typeof cfg.models !== "object" || Array.isArray(cfg.models)) {
+        die("models must be an object");
+    }
+    if (!cfg.models.roles || typeof cfg.models.roles !== "object" || Array.isArray(cfg.models.roles)) {
+        die("models.roles must be an object");
+    }
+    const roleValue = (where, value) => {
+        if (typeof value === "string") return;
+        if (Array.isArray(value) && value.length && value.every((v) => typeof v === "string")) return;
+        die(`${where} must be a model string or a non-empty array of model strings`);
+    };
+    for (const [role, value] of Object.entries(cfg.models.roles)) {
+        roleValue(`models.roles.${role}`, value);
+    }
+
+    if (!cfg.interrogate || typeof cfg.interrogate !== "object" || Array.isArray(cfg.interrogate)) {
+        die("interrogate must be an object");
+    }
+    if (!Array.isArray(cfg.interrogate.reviewers)) {
+        die("interrogate.reviewers must be an array");
+    }
+    for (const [i, reviewer] of cfg.interrogate.reviewers.entries()) {
+        if (!reviewer?.label || !reviewer?.model) {
+            die(`interrogate.reviewers[${i}] needs label and model`);
+        }
+        if (typeof reviewer.label !== "string" || typeof reviewer.model !== "string") {
+            die(`interrogate.reviewers[${i}] label and model must be strings`);
+        }
+    }
 }
 
 // The slice of config the WORKFLOW needs.
@@ -178,6 +213,11 @@ function validate(cfg) {
 // tool-call boundary that has mangled smart quotes and raw angle brackets
 // before.
 export function workflowSlice(cfg) {
+    const catalog = loadModelCatalog();
+    const builderRole = resolveRole(cfg, "builder", { catalog });
+    const verifierRole = cfg.verify.model
+        ? resolveModel(cfg.verify.model, catalog, "verify.model")
+        : resolveRole(cfg, "verifier", { catalog });
     return {
         anchors: cfg.anchors.map((a) => ({
             id: a.id,
@@ -195,7 +235,9 @@ export function workflowSlice(cfg) {
         // OPTIONAL. Null unless a project pins one, and the graph spreads it
         // only when truthy, so the default path passes no model key at all and
         // every verifier inherits the main loop exactly as before.
-        verifierModel: cfg.verify.model ?? null,
+        builderModel: builderRole?.model ?? null,
+        verifierModel: verifierRole?.model ?? null,
+        reviewers: reviewerRoster(cfg, { catalog }),
         // OPTIONAL, DEFAULT OFF, and it DOUBLES the verifier spend when on.
         // `=== true` rather than `!== false`, because a mechanism that costs a
         // second full verification wave must be switched on deliberately and
