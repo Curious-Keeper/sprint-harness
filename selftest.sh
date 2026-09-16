@@ -227,6 +227,189 @@ out=$(ANTHROPIC_API_KEY=x OPENAI_API_KEY=y SPRINT_HARNESS_CONFIG="$TMP/model-rol
     && ok "model status checks env presence without printing secrets" \
     || no "model status checks env presence without printing secrets ($out)"
 
+# DISPATCH. models.mjs answers "does this machine know the name"; dispatch.mjs
+# answers "can anything here REACH it". The two were one question for a while,
+# and the gap was invisible: a roster resolved three vendors cleanly and the
+# caller could only spawn one of them, so the run silently became single-vendor.
+# Every assertion below is about the reachability verdict, not the name.
+mkdir -p "$TMP/fakebin"
+printf '#!/bin/sh\nexit 0\n' > "$TMP/fakebin/fake-runner"
+chmod +x "$TMP/fakebin/fake-runner"
+cat > "$TMP/runner-catalog.json" <<JSON
+{"providers":{"anthropic":{"apiKeyEnv":"ANTHROPIC_API_KEY"},"openai":{"apiKeyEnv":"OPENAI_API_KEY"},"xai":{"apiKeyEnv":"XAI_API_KEY"}},
+ "runners":{"fake-runner":{"cmd":"fake-runner","args":["-p","--mode","ask"],"modelFlag":"--model"},
+            "absent-runner":{"cmd":"definitely-not-installed-xyz","args":[]}},
+ "models":{"claude-opus-5":{"provider":"anthropic","runner":"host"},
+           "gpt-5.6":{"provider":"openai","runner":"fake-runner","runnerModel":"vendor-slug-9"},
+           "grok-4.6-fast":{"provider":"xai","runner":"absent-runner"}}}
+JSON
+D="import(\"$REPO/.claude/harness-core/lib/dispatch.mjs\")"
+M="import(\"$REPO/.claude/harness-core/lib/models.mjs\")"
+
+# The runner is handed runnerModel, never the catalog slug. These differ on
+# purpose: the catalog names what the PROJECT asked for and the runner names
+# what the VENDOR calls it today. Passing the wrong one fails at the provider.
+out=$(PATH="$TMP/fakebin:$PATH" node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/runner-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"gpt-5.6\",c)))})" 2>&1)
+[[ "$out" == *'"via":"runner"'* && "$out" == *'"--model","vendor-slug-9"'* && "$out" != *'"--model","gpt-5.6"'* ]] \
+    && ok "dispatch passes the runner its own model slug, not the catalog slug" \
+    || no "dispatch passed the wrong slug to the runner ($out)"
+
+# A runner that is not installed is UNREACHABLE, not quietly downgraded.
+out=$(env -u XAI_API_KEY node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/runner-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"grok-4.6-fast\",c,\"x\",{PATH:\"/nonexistent\"})))})" 2>&1)
+[[ "$out" == *'"via":"unreachable"'* && "$out" == *'"argv":null'* ]] \
+    && ok "dispatch calls a missing runner unreachable" \
+    || no "dispatch did not mark a missing runner unreachable ($out)"
+
+# ...unless the provider key is there, which a direct API caller could use.
+out=$(node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/runner-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"grok-4.6-fast\",c,\"x\",{PATH:\"/nonexistent\",XAI_API_KEY:\"k\"})))})" 2>&1)
+[[ "$out" == *'"via":"apiKey"'* && "$out" != *'"k"'* ]] \
+    && ok "dispatch falls back to a present provider key without printing it" \
+    || no "dispatch mishandled the apiKey fallback ($out)"
+
+# THE WHOLE POINT. An unreachable reviewer must stay in the roster as
+# unreachable. Dropping it hides the degradation; replacing it with a reachable
+# model fakes diversity that is not there, which is the failure this exists to
+# prevent.
+cat > "$TMP/runner-roles.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],
+ "models":{"roles":{"reviewer":["claude-opus-5","gpt-5.6","grok-4.6-fast"]}}}
+JSON
+out=$(PATH="$TMP/fakebin:$PATH" SPRINT_HARNESS_CONFIG="$TMP/runner-roles.json" \
+    SPRINT_HARNESS_MODELS="$TMP/runner-catalog.json" node -e \
+    "Promise.all([$D,import(\"$REPO/.claude/harness-core/lib/config.mjs\")]).then(([d,c])=>{
+     const r=d.rosterDispatch(c.loadConfig(),{env:{PATH:\"$TMP/fakebin\"}});
+     console.log(JSON.stringify({n:r.reviewers.length,u:r.unreachable.map(x=>x.model),v:r.vendors,x:r.crossVendor}))})" 2>&1)
+[[ "$out" == *'"n":3'* && "$out" == *'"u":["grok-4.6-fast"]'* && "$out" == *'"x":true'* ]] \
+    && ok "an unreachable reviewer stays in the roster, marked, never substituted" \
+    || no "roster dropped or substituted an unreachable reviewer ($out)"
+
+# A KEY IS NOT A DISPATCHER. With no runner installed but both keys set, the
+# roster once reported three healthy vendors and an empty unreachable list —
+# nothing could actually run two of them, because this harness ships no API
+# client. crossVendor has to see through that.
+out=$(PATH="$TMP/fakebin:$PATH" SPRINT_HARNESS_CONFIG="$TMP/runner-roles.json" \
+    SPRINT_HARNESS_MODELS="$TMP/runner-catalog.json" node -e \
+    "Promise.all([$D,import(\"$REPO/.claude/harness-core/lib/config.mjs\")]).then(([d,c])=>{
+     const r=d.rosterDispatch(c.loadConfig(),{env:{PATH:\"/nonexistent\",OPENAI_API_KEY:\"k\",XAI_API_KEY:\"k\"}});
+     console.log(JSON.stringify({v:r.vendors,x:r.crossVendor,k:r.keyOnly.map(e=>e.model)}))})" 2>&1)
+[[ "$out" == *'"x":false'* && "$out" == *'"v":["anthropic"]'* && "$out" == *'"k":["gpt-5.6","grok-4.6-fast"]'* ]] \
+    && ok "a bare provider key is reported, but never counted as a reachable vendor" \
+    || no "a bare provider key was counted as reachable ($out)"
+
+# One vendor is a fact the caller must surface, so crossVendor has to go false.
+cat > "$TMP/one-vendor.json" <<JSON
+{"project":{"name":"fixture","mainBranch":"main"},"queue":{"path":"QUEUE.json"},"anchors":[{"id":"test","cmd":"true"}],
+ "models":{"roles":{"reviewer":["claude-opus-5"]}}}
+JSON
+out=$(SPRINT_HARNESS_CONFIG="$TMP/one-vendor.json" SPRINT_HARNESS_MODELS="$TMP/runner-catalog.json" node -e \
+    "Promise.all([$D,import(\"$REPO/.claude/harness-core/lib/config.mjs\")]).then(([d,c])=>{
+     console.log(JSON.stringify(d.rosterDispatch(c.loadConfig(),{env:{PATH:\"/nonexistent\"}}).crossVendor))})" 2>&1)
+[[ "$out" == "false" ]] \
+    && ok "a single-vendor roster reports crossVendor false" \
+    || no "a single-vendor roster did not report crossVendor false ($out)"
+
+# Catalog guards. A runnerModel with no runner is a config that looks complete
+# and silently passes the catalog slug to nothing.
+cat > "$TMP/bad-runner.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},"models":{"gpt-5.6":{"provider":"openai","runnerModel":"x"}}}
+JSON
+out=$(node -e "$M.then(m=>m.loadModelCatalog(\"$TMP/bad-runner.json\"))" 2>&1)
+grep -q 'runnerModel has no runner to pass it to' <<< "$out" \
+    && ok "refuses a runnerModel with no runner" \
+    || no "refuses a runnerModel with no runner ($out)"
+
+cat > "$TMP/unknown-runner.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},"models":{"gpt-5.6":{"provider":"openai","runner":"nope"}}}
+JSON
+out=$(node -e "$M.then(m=>m.loadModelCatalog(\"$TMP/unknown-runner.json\"))" 2>&1)
+grep -q 'names unknown runner "nope"' <<< "$out" \
+    && ok "refuses a model naming a runner the catalog does not define" \
+    || no "refuses a model naming an undefined runner ($out)"
+
+# BOTH OF THESE WERE FOUND BY A GPT REVIEWER on this module's own first diff,
+# which is the argument for the runner layer existing at all.
+# A file on PATH without the execute bit was reported as a reachable runner and
+# failed with EACCES at spawn — after the roster was already called healthy.
+printf 'not executable\n' > "$TMP/fakebin/fake-runner-noexec"
+chmod 644 "$TMP/fakebin/fake-runner-noexec"
+cat > "$TMP/noexec-catalog.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},
+ "runners":{"noexec":{"cmd":"fake-runner-noexec","args":[]}},
+ "models":{"gpt-5.6":{"provider":"openai","runner":"noexec"}}}
+JSON
+out=$(node -e \
+    "Promise.all([$D,$M]).then(([d,m])=>{const c=m.loadModelCatalog(\"$TMP/noexec-catalog.json\");
+     console.log(JSON.stringify(d.runnerFor(\"gpt-5.6\",c,\"x\",{PATH:\"$TMP/fakebin\"})))})" 2>&1)
+[[ "$out" == *'"via":"unreachable"'* ]] \
+    && ok "a PATH file without the execute bit is not a reachable runner" \
+    || no "a non-executable file was reported as a reachable runner ($out)"
+
+# A dangling runner name threw TypeError on a property of undefined instead of
+# naming the bad config.
+out=$(node -e \
+    "$D.then(d=>d.runnerFor(\"m\",{providers:{p:{}},runners:{},models:{m:{provider:\"p\",runner:\"ghost\"}}},\"roster\"))" 2>&1)
+grep -q 'names runner "ghost", which the catalog does not define' <<< "$out" \
+    && ok "a dangling runner name names itself instead of throwing TypeError" \
+    || no "a dangling runner name did not report cleanly ($out)"
+
+# ASKING FOR A MODEL IS NOT GETTING ONE. `pi --provider xai` is accepted,
+# ignored, and answers from openai-codex — so a roster can claim three vendors,
+# run two, and say nothing. That is worse than a short roster because it is
+# invisible. These fixtures are real captured output from that exact trap.
+cat > "$TMP/ran-trap.jsonl" <<'JSONL'
+{"type":"turn_start"}
+not json at all
+{"type":"turn_end","message":{"provider":"openai-codex","model":"gpt-5.5","usage":{"cost":{"total":0.0023}}}}
+{"type":"agent_settled"}
+JSONL
+REP='{"format":"jsonl","event":"turn_end","modelPath":"message.model","providerPath":"message.provider","costPath":"message.usage.cost.total"}'
+out=$(node -e \
+    "Promise.all([$D,import(\"node:fs\")]).then(([d,fs])=>console.log(JSON.stringify(
+     d.ranAs(fs.readFileSync(\"$TMP/ran-trap.jsonl\",\"utf8\"), $REP))))" 2>&1)
+[[ "$out" == *'"provider":"openai-codex"'* && "$out" == *'"model":"gpt-5.5"'* && "$out" == *'"cost":0.0023'* ]] \
+    && ok "ranAs reads back the model a runner actually ran" \
+    || no "ranAs did not read back the real model ($out)"
+
+# Non-JSON lines interleaved with JSONL must not abort the scan — the real
+# runner emits them, and a parse that gives up on the first one reports
+# "did not report" for a runner that did.
+grep -q 'not json at all' "$TMP/ran-trap.jsonl" \
+    && ok "the ranAs fixture really does contain a non-JSON line" \
+    || no "the ranAs fixture lost its non-JSON line"
+
+# A runner that does not report is a BLIND SPOT, and null is how it says so.
+# Returning a guess here would be the silent-reroute bug wearing a hat.
+out=$(node -e "$D.then(d=>console.log(JSON.stringify(d.ranAs('{\"type\":\"turn_end\"}',null))))" 2>&1)
+[[ "$out" == "null" ]] \
+    && ok "ranAs returns null for a runner that reports nothing" \
+    || no "ranAs invented a result for a non-reporting runner ($out)"
+
+# Output with no matching event is also null, not the last line it happened to
+# parse.
+out=$(node -e "$D.then(d=>console.log(JSON.stringify(d.ranAs('{\"type\":\"other\",\"message\":{\"model\":\"x\"}}',$REP))))" 2>&1)
+[[ "$out" == "null" ]] \
+    && ok "ranAs ignores events that are not the reporting event" \
+    || no "ranAs matched the wrong event ($out)"
+
+cat > "$TMP/bad-reports.json" <<JSON
+{"providers":{"openai":{"apiKeyEnv":"OPENAI_API_KEY"}},
+ "runners":{"r":{"cmd":"x","args":[],"reports":{"format":"text","event":"e","modelPath":"m","providerPath":"p"}}},
+ "models":{"gpt-5.6":{"provider":"openai","runner":"r"}}}
+JSON
+out=$(node -e "$M.then(m=>m.loadModelCatalog(\"$TMP/bad-reports.json\"))" 2>&1)
+grep -q 'reports.format must be "jsonl"' <<< "$out" \
+    && ok "refuses a reports block in a format ranAs cannot read" \
+    || no "refuses an unreadable reports format ($out)"
+
+node --check "$HERE/core/lib/dispatch.mjs" 2>/dev/null \
+    && ok "dispatch.mjs parses" || no "dispatch.mjs parses"
+
 # THE SCHEMA AND THE LOADER CAN DRIFT, and the kit says so as a known gap:
 # validate() is hand-written and nothing checked it against the JSON schema. This
 # does not do full validation (no ajv dependency), but it catches the class that

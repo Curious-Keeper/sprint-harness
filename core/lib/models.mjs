@@ -10,6 +10,12 @@ import { resolve } from "node:path";
 
 export const MODEL_ALIASES = new Set(["auto", "inherit-parent"]);
 
+// A model whose runner is "host" is spawned by whatever agent runtime is
+// calling us, with its own native mechanism. The harness cannot verify that
+// runtime can actually reach the model, so it never claims so — see
+// dispatch.mjs. Every other runner names a command this machine must have.
+export const HOST_RUNNER = "host";
+
 export function catalogPath() {
     return process.env.SPRINT_HARNESS_MODELS ??
         resolve(homedir(), ".config/sprint-harness/models.json");
@@ -61,6 +67,47 @@ function validateCatalog(catalog, path) {
         if (!catalog.providers[model.provider]) {
             die(`models.${slug}.provider names unknown provider ${JSON.stringify(model.provider)}`);
         }
+        if ("runner" in model && typeof model.runner !== "string") {
+            die(`models.${slug}.runner must be a string`);
+        }
+        if ("runnerModel" in model && typeof model.runnerModel !== "string") {
+            die(`models.${slug}.runnerModel must be a string`);
+        }
+        if ("runnerModel" in model && !("runner" in model)) {
+            die(`models.${slug}.runnerModel has no runner to pass it to`);
+        }
+        if (model.runner && model.runner !== HOST_RUNNER && !catalog.runners?.[model.runner]) {
+            die(`models.${slug}.runner names unknown runner ${JSON.stringify(model.runner)}`);
+        }
+    }
+
+    for (const [name, runner] of Object.entries(catalog.runners ?? {})) {
+        if (!runner || typeof runner !== "object" || Array.isArray(runner)) {
+            die(`runners.${name} must be an object`);
+        }
+        if (typeof runner.cmd !== "string" || !runner.cmd) {
+            die(`runners.${name}.cmd is required`);
+        }
+        if (!Array.isArray(runner.args) || runner.args.some((a) => typeof a !== "string")) {
+            die(`runners.${name}.args must be an array of strings`);
+        }
+        if ("modelFlag" in runner && typeof runner.modelFlag !== "string") {
+            die(`runners.${name}.modelFlag must be a string`);
+        }
+        if ("reports" in runner) {
+            const r = runner.reports;
+            if (!r || typeof r !== "object" || Array.isArray(r)) {
+                die(`runners.${name}.reports must be an object`);
+            }
+            if (r.format !== "jsonl") {
+                die(`runners.${name}.reports.format must be "jsonl"`);
+            }
+            for (const k of ["event", "modelPath", "providerPath"]) {
+                if (typeof r[k] !== "string" || !r[k]) {
+                    die(`runners.${name}.reports.${k} is required`);
+                }
+            }
+        }
     }
 }
 
@@ -80,6 +127,8 @@ export function resolveModel(spec, catalog, where) {
         model: spec,
         provider: model.provider,
         apiKeyEnv: catalog.providers[model.provider]?.apiKeyEnv ?? null,
+        runner: model.runner ?? null,
+        runnerModel: model.runnerModel ?? spec,
     };
 }
 

@@ -5,6 +5,7 @@
 
 import { loadConfig } from "./lib/config.mjs";
 import { catalogPath, loadModelCatalog, MODEL_ALIASES, resolveModel, reviewerRoster } from "./lib/models.mjs";
+import { rosterDispatch, UNREACHABLE } from "./lib/dispatch.mjs";
 
 const argv = process.argv.slice(2);
 const cmd = argv[0] ?? "status";
@@ -36,16 +37,26 @@ export function modelStatus(env = process.env) {
     const cfg = loadConfig();
     const catalog = loadModelCatalog();
     const roles = effectiveRoles(cfg, catalog, env);
-    const reviewers = reviewerRoster(cfg, { catalog }).map((r) => ({
+    const dispatch = rosterDispatch(cfg, { catalog, env });
+    const reviewers = reviewerRoster(cfg, { catalog }).map((r, i) => ({
         label: r.label,
         ...statusForResolved(r, env),
+        via: dispatch.reviewers[i].via,
+        runner: dispatch.reviewers[i].runner,
+        argv: dispatch.reviewers[i].argv,
+        why: dispatch.reviewers[i].why,
     }));
-    const missingEnv = [...roles, ...reviewers].filter((r) => r.env === "missing");
+    // A reviewer reachable through a runner needs no API key, so a missing
+    // apiKeyEnv is not a failure for it. Only an UNREACHABLE reviewer is.
+    const missingEnv = roles.filter((r) => r.env === "missing");
     return {
-        ok: missingEnv.length === 0,
+        ok: missingEnv.length === 0 && dispatch.unreachable.length === 0
+            && dispatch.keyOnly.length === 0,
         catalog: { path: catalogPath(), present: catalog !== null },
         roles,
         reviewers,
+        crossVendor: dispatch.crossVendor,
+        vendors: dispatch.vendors,
     };
 }
 
@@ -99,17 +110,35 @@ function printStatus(status) {
     }
     for (const r of status.reviewers) {
         console.log(`  ${r.label}: ${label(r)}`);
+        console.log(`    via ${r.via} — ${r.why}`);
+    }
+    if (status.reviewers.length) {
+        console.log(`vendors reachable: ${status.vendors.join(", ") || "none"}`);
+        if (!status.crossVendor) {
+            console.log("  WARNING: one vendor only — a multi-model review has no");
+            console.log("  cross-vendor signal. Do not substitute tiers to fill the roster.");
+        }
     }
     if (!status.ok) {
         console.log("missing environment variables:");
-        for (const r of [...status.roles, ...status.reviewers].filter((x) => x.env === "missing")) {
-            console.log(`  ${r.apiKeyEnv} for ${r.role ?? r.label} (${r.model})`);
+        for (const r of status.roles.filter((x) => x.env === "missing")) {
+            console.log(`  ${r.apiKeyEnv} for ${r.role} (${r.model})`);
+        }
+        for (const r of status.reviewers.filter((x) => x.via === UNREACHABLE)) {
+            console.log(`  unreachable: ${r.label} (${r.model}) — ${r.why}`);
+        }
+        for (const r of status.reviewers.filter((x) => x.via === "apiKey")) {
+            console.log(`  no dispatcher: ${r.label} (${r.model}) — ${r.why};`);
+            console.log(`    install its runner, or call ${r.provider} yourself`);
         }
     }
 }
 
 function label(r) {
     if (!r.model) return `${r.spec ?? "inherit-parent"} (host chooses)`;
+    // A reviewer reached through the host or a runner never sees the provider
+    // key, so printing it as "missing" reads as a fault that is not one.
+    if (r.via && r.via !== "apiKey") return `${r.model} via ${r.provider}`;
     const env = r.apiKeyEnv ? `${r.apiKeyEnv} ${r.env}` : "no apiKeyEnv";
     return `${r.model} via ${r.provider} (${env})`;
 }
