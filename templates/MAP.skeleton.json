@@ -51,6 +51,11 @@
         ]
     },
 
+    "coverageGaps": {
+        "$howToWrite": "Surfaces or methods nobody checked. Write these down so a later audit does not conclude clean about code it never opened. These are reference entries, not work items.",
+        "items": []
+    },
+
     "plannedWork": {
         "$comment": "Wanted, not yet dispatchable. Split from openDebt because these need scoping before a builder can be pointed at them.",
         "backlog": [
@@ -58,6 +63,10 @@
         ],
         "decisionsOwed": {
             "$comment": "NOT CODE. These need a human to decide something. Dispatching a builder at one produces confident fiction. Kept in the map so they are visible; kept out of the dispatchable lanes so they are never handed to an agent.",
+            "items": []
+        },
+        "decisionsSettled": {
+            "$comment": "Closed decisions keep their ids because prose elsewhere cites them. Settling a decision queues no work; any follow-up work goes into plannedWork.backlog with a ref to the decision.",
             "items": []
         }
     },

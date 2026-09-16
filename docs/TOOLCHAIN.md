@@ -46,6 +46,23 @@ When you change a harness config key, update these files:
 
 When you change shared vocabulary, update `CONTEXT.md` first. Then update prose in the other two repositories to use the same term.
 
+## Vocabulary
+
+`CONTEXT.md` is the shared glossary. Use these names consistently across all
+three repositories:
+
+- Toolchain: the full portable system.
+- Map: the repo-local truth file, usually `docs/app-maps/APP_MAP.json`.
+- Harness: the runtime that dispatches and verifies sprint work.
+- Board: the human operating surface over maps.
+- Workflow Skill: an agent workflow document.
+- Consumer Project: a repository that carries toolchain files.
+- Provider Roster: the configured set of model/provider choices.
+- Role: a named model-selection responsibility.
+
+Do not use one component name for the whole system. For example, do not call the
+whole Toolchain "the harness" or "the board".
+
 ## Verification
 
 Run the local check for each repository that the change touches.
@@ -53,6 +70,7 @@ Run the local check for each repository that the change touches.
 ```bash
 # sprint-harness
 ./selftest.sh
+./check-vocabulary.py
 
 # appmap-board
 cd ../appmap-board
@@ -63,6 +81,7 @@ python3 tests/mutations.py
 cd ../skills
 python3 -m json.tool manifest.json >/dev/null
 python3 -m json.tool manifest.schema.json >/dev/null
+python3 check_manifest.py
 ```
 
 For a map shape change, also run the board against a fixture registry before using the real registry.

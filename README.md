@@ -148,7 +148,7 @@ Portability depends on keeping three layers separate.
 | Knowledge | map entries, invariants, coverage gaps | your project docs |
 
 `core/` never imports project knowledge. Config is the only channel between the
-runtime and the consumer project.
+runtime and the Consumer Project.
 
 ## Model and provider setup
 
@@ -202,4 +202,4 @@ failures that produced clean-looking reports.
 ## License
 
 [MPL-2.0](LICENSE). File-level copyleft applies to the harness files. Your
-consumer project remains yours.
+Consumer Project remains yours.
