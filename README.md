@@ -1,246 +1,202 @@
 # sprint-harness
 
-A portable build/verify graph for running batches of code work through parallel
-agents, with **one human gate at the end instead of one per item**.
+`sprint-harness` is a portable workflow for running wide code work through
+isolated agents, independent verifier lenses, and one human gate at the end.
 
-Extracted from a working harness on a Next.js + Supabase client project that
-shipped nine batches through it. This repo is the generalisation: the machinery
-that was never project-specific, separated from the parts that always will be.
+It was extracted from a Next.js + Supabase project that shipped nine batches
+with a project-specific version. This repo holds the reusable part: the graph,
+guards, installer, templates, and the adoption docs.
 
-> **Not a framework.** It is ~1700 lines of plain code — 1026 of them excluding
-> comments and blanks — and six documents. The documents are the more valuable
-> half.
-
----
+The goal is not to remove judgment. The goal is to replace one approval per item
+with one reviewable batch report, without trusting agents to coordinate with each
+other.
 
 ## The model
 
 <img width="1200" height="630" alt="og-diamond" src="https://github.com/user-attachments/assets/333c84d5-a546-49c7-9c50-219d0762429a" />
 
-
-### Full Graph
-
+```text
+  map or queue ─→ [extract] ─→ QUEUE.json
+                                  │
+                         [plan-batch.mjs]
+                                  │
+                 union-find over declared files
+                                  │
+        ┌──────────┬──────────────┼──────────┐
+      build      build          build      build     one worktree per node
+        │          │              │          │
+     verify      verify        verify      verify    fresh context, N lenses
+        └──────────┴──────┬───────┴──────────┘
+                        reduce                         plain code
+                          │
+                     integrate.sh                      wave order, anchors on merged tree
+                          │
+                    human gate                         one report, one diff
+                          │
+                         PR
 ```
-  your list ─→ [intake] ─→ QUEUE.json
-                              │
-                     [plan-batch.mjs]      plain code — collision detection
-                              │            NEVER a model
-        ┌──────────┬──────────┼──────────┐   wave 0: fan out, worktree each
-      build      build      build      build
-        │          │          │          │
-     verify×N   verify×N   verify×N   verify×N  fresh context, N lenses
-        └──────────┴────┬─────┴──────────┘
-                   [reduce]                 returned vs dispatched, anchor
-                        │                   claimed vs anchor observed
-                  [integrate]               integrate.sh: wave order, merged anchors
-                        │
-                  ┌ HUMAN GATE ┐            you read ONE report, ONE diff
-                        │
-                       PR
-```
 
-Four properties do the work:
+Four rules do the work:
 
-**1. Collision detection is plain code with no model in it.** Two agents editing
-one file in two worktrees is the way a fan-out corrupts a repo. That decision is
-union-find over declared file sets, printed for you to read *before* anything
-runs.
+1. **The partition is code, not a model.** File-set collisions are union-find over
+   declared paths. The plan prints before any agent runs.
+2. **Verifiers do not share the builder's context.** A verifier starts from the
+   branch and the contract, not from the builder's explanation.
+3. **Lenses ask different questions.** One rejecting lens rejects the node. Three
+   identical reviewers are only a vote.
+4. **Anchors beat agreement.** The reducer trusts exit codes that it watched
+   happen. If a builder claims exit 0 and a verifier observes exit 1, the report
+   names the disagreement.
 
-**2. Verifiers never see the builder's context.** A model grading its own output
-is far too easy on itself, and a verifier sharing the builder's context is that
-same loop wearing a different hat.
+## What is in this repo
 
-**3. The lenses ask different questions, so one reject fails the node.** Three
-identical reviewers are a majority vote. Three different questions are three
-independent tests.
-
-**4. Anchors, not agreement.** A graph where every node reads another node's
-report and they all agree is *consistent and unverified*. What this trusts is exit
-codes it watched happen. When a builder claims exit 0 and an independent verifier
-observes 1, the report says so — and that line is the single most valuable output
-the system produces.
-
----
-
-## What you get
-
-```
-core/                       copied verbatim into a project — never edited
-  plan-batch.mjs            the partitioner: union-find, lanes, waves
-  sprint-batch.mjs          the graph: fan out → N lenses → plain-code reduce
-  integrate.sh              wave-order merge + regenerate + anchors on the MERGED tree
-  scope-gate.sh             "this node may only touch the files it owns"
-  reduce-fixture.mjs        tests the reduce against known-bad results, zero agents
-  canary.mjs                plants known defects and scores what the lenses caught
-                            — the ONE file install.sh does not copy into a project
+```text
+core/
+  plan-batch.mjs            builds the waves and collision graph
+  sprint-batch.mjs          runs build, verify, reduce, and optional confirm pass
+  integrate.sh              merges accepted nodes in wave order and reruns anchors
+  scope-gate.sh             rejects undeclared file changes
+  paired-artifact-gate.sh   enforces "changed X must ship changed Y"
   preflight.sh              read-only readiness check
-  deny-push.sh              PreToolUse hard-deny, fail-closed
-  paired-artifact-gate.sh   "changed X must ship changed Y", with an audit trail
-  lib/config.mjs            loader; refuses configs that weaken a guarantee
-  lib/extract.mjs           citation resolution, state merge, collision report
-  lib/models.mjs            joins role config to the host catalog, never a secret
-  lib/dispatch.mjs          whether anything here can REACH a model, and with what
+  deny-push.sh              fail-closed push guard for agent sessions
+  serialize.sh              host-wide lock wrapper for contended anchors
+  reduce-fixture.mjs        mutation-tested reducer fixtures, no agents required
+  canary.mjs                plants known defects and scores verifier detection
+  models.mjs                reports project model roles and local reachability
+  lib/                      config, extraction, model, and dispatch helpers
 
-templates/                  scaffolds you fill in, once per project
-  sprint-builder.md         {{REPO_INVARIANTS}} is yours
-  sprint-verifier.md        the same invariants, as a skeptic's questions
-  SKILL.md                  the /sprint runbook
-  extract-queue.mjs         ~40 lines of map-walking is all you write
-  MAP.skeleton.json         four structural principles, no domain content
+templates/
+  sprint-builder.md         builder contract with repo invariants inserted
+  sprint-verifier.md        verifier contract with lens questions
+  SKILL.md                  installed /sprint workflow
+  extract-queue.mjs         project-owned map-to-queue adapter
+  MAP.skeleton.json         minimal map shape
+  prompts/                  copy-paste adoption prompts for full and small tracks
 
-templates/prompts/          copy-paste session prompts, 00 → 05
-examples/                   working configs: node-web, go-service
+examples/
+  node-web.harness.config.json
+  go-service.harness.config.json
+
 docs/
-  RUNBOOK.md                ← start here: new project → first batch, 4–6 sessions
-  RUNBOOK-SMALL.md          compressed path for 1–3 surfaces, + the sizing fork
-  MAP_GUIDE.md              how to write the map, with real before/after
-  SCARS.md                  ← then this: 19 failures and the guards they produced
+  RUNBOOK.md                full adoption path
+  RUNBOOK-SMALL.md          smaller-project path and sizing fork
+  MAP_GUIDE.md              how to write dispatchable map entries
+  MODELS.md                 model roles, provider catalog, and runners
+  SCARS.md                  38 failures and the guards they produced
   DESIGN.md                 what generalises, what cannot, and known gaps
-  cross-runtime-verifier.md a retracted design, kept for its findings
-  PORTING.md                per-step detail, and how to tell if it's working
+  PORTING.md                detailed porting notes
 ```
 
----
+## Install into a project
 
-## Install
-
-The kit stays here. It installs **into** a project — you never copy or paste it in.
+The kit stays in this clone. `install.sh` copies the runtime into another git
+repo under `.claude/`.
 
 ```bash
-git clone # clone this repo wherever you want to store the full harness and examples, etc...
-cd /path/to/your-existing-project # go to whichever project you want to use the harness in
-git checkout -b chore/sprint-harness # create a harness branch for initial setup
-~/git_projects/sprint-harness/install.sh . --stack node-web # read the runbook along side your install for steps
+git clone <this-repo-url> ~/git_projects/sprint-harness
+cd /path/to/your-existing-project
+git checkout -b chore/sprint-harness
+~/git_projects/sprint-harness/install.sh . --stack node-web
 
-git add .claude && git commit -m "chore: install sprint harness" # This can't be skipped
- # the agents can only see/use what is tracked because they fan out using worktrees. Not tracked = broken
+git add .claude
+git commit -m "chore: install sprint harness"
 ```
 
-That second command is load-bearing. Builders run in git worktrees, which
-materialize **only tracked files** — so a gitignored `.claude/` means a builder's
-worktree contains no harness at all, and an anchor invoking a script under it does
-not fail, it *is not there*. `install.sh` refuses quietly to let that pass: it
-checks and stops you loudly.
+Do not skip the commit. Builders run in git worktrees, and worktrees contain only
+tracked files. If `.claude/` is ignored or uncommitted, the builder worktree does
+not contain the harness.
 
-Then open a session in that project and paste the first prompt.
+Then follow the runbook:
 
-> **`templates/` stays in this clone; it is not copied into your project, and
-> that is intentional.** The prompts and [`MAP.skeleton.json`](templates/MAP.skeleton.json)
-> are adoption material for *you*, not runtime material for the harness — nothing
-> in `core/` reads them. Keep this repo checked out somewhere while you work
-> through the runbook and reference them from here; the paths in the docs assume
-> `~/git_projects/sprint-harness`, so adjust if you cloned elsewhere.
+- Use [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for the full track.
+- Use [`docs/RUNBOOK-SMALL.md`](docs/RUNBOOK-SMALL.md) for a project with one to
+  three surfaces.
+- Use [`templates/prompts/`](templates/prompts/) as the copy-paste session prompts.
 
-Then follow [**docs/RUNBOOK.md**](docs/RUNBOOK.md) — 4–6 sessions to a first green
-batch, with a copy-paste prompt per phase in
-[`templates/prompts/`](templates/prompts/):
+The prompts assume this repo lives at `~/git_projects/sprint-harness`. Adjust the
+paths if you clone it somewhere else.
 
+## Adoption shape
+
+The full track is usually four to six working sessions:
+
+```text
+PHASE 0  decide and install
+PHASE 1  anchors
+PHASE 2  map skeleton and evolution traps
+PHASE 3  audit lanes into openDebt
+PHASE 4  invariants and coverage gaps
+PHASE 5  extractor and contracts
+PHASE 6  small first batch
 ```
-  PHASE 0  decide + install                        30 min, human
-  PHASE 1  anchors                                 1–2 h    ← before the map
-  PHASE 2  map skeleton: structure + traps         1 session
-  PHASE 3  audit lanes → openDebt                  1 session, parallel
-  PHASE 4  invariants + coverage honesty           half session
-  PHASE 5  wire extractor + contracts              1 session
-  PHASE 6  a deliberately small first batch        1 session
-```
 
-Almost all of that is the map — the one artifact the harness cannot generate for
-you. Anchors come **before** it: they are testable in an hour, and the map is
-worth nothing without them.
+The map is the main work. The harness can plan from a hand-maintained queue, but
+it gets most of its value when the queue is derived from a map with real
+`file:line` evidence.
 
-**Smaller project?** [docs/RUNBOOK-SMALL.md](docs/RUNBOOK-SMALL.md) compresses this
-to 3–4 light sessions, and opens with a sizing fork — because the harness has two
-halves that pay off at different sizes. The **spine** (map, anchors, push guard,
-paired-artifact gate) is worth having on a one-person project. The **graph**
-(queue, partitioner, fan-out, N-lens verify) needs work that is genuinely wide.
-Taking only the spine is a legitimate outcome, and adopting the graph later costs
-one session with nothing wasted.
+## Configuration layers
 
----
+Portability depends on keeping three layers separate.
 
-## The three layers
-
-Portability depends entirely on nothing leaking upward.
-
-| Layer | What | Portable? |
+| Layer | Contains | Edited where |
 |---|---|---|
-| **Machinery** | partitioner, graph, reduce, guards, gates | copied verbatim |
-| **Config** | anchors, setup, lanes, paired artifacts, branch policy | one JSON file |
-| **Knowledge** | the map, and which invariants have already burned you | 100% yours |
+| Machinery | graph, reduce, guards, gates | copied from `core/` |
+| Config | anchors, lanes, paired artifacts, model roles | `.claude/harness.config.json` |
+| Knowledge | map entries, invariants, coverage gaps | your project docs |
 
-`core/` never imports from the knowledge layer. Config is the only channel between
-them.
+`core/` never imports project knowledge. Config is the only channel between the
+runtime and the consumer project.
 
----
+## Model and provider setup
 
-## Read SCARS.md
+Projects can name roles such as `builder`, `verifier`, `reviewer`, `planner`,
+`scope`, and `summarizer` in `.claude/harness.config.json`. Local provider and
+runner availability belongs in:
 
-[docs/SCARS.md](docs/SCARS.md) is nineteen failures, each with the design decision
-it produced. A sample:
+```text
+~/.config/sprint-harness/models.json
+```
 
-- **Lost structured output manufactured five false negatives.** 7 of 18 verifiers
-  died on a retry cap trying to emit 3.5KB of prose into one JSON string field.
-  Every lost verdict was a `pass`. Fixed with `maxLength: 300` — telling a model
-  "be brief" fails under pressure; a schema constraint does not.
-- **Agents borrowed `node_modules` from other worktrees** because the contract
-  offered an escape hatch "if a fresh install is too slow". All of them took it.
-  The anchors then ran against a dependency set that didn't belong to the commit.
-  *Any* instruction of the form "if X is slow, do Y instead" will be taken 100% of
-  the time.
-- **`set -o pipefail` + `grep -q` silently broke a gate.** grep exits on match,
-  SIGPIPEs the writer, pipefail reports the pipeline as failed *even though grep
-  matched*. A valid waiver was reported as a violation, intermittently.
-- **"A component you change ships a test"** sat in an agent contract as prose for
-  a week and produced three test files across fifty-one components. It became an
-  exit code and started binding immediately.
+Check a project with:
 
-The pattern: almost none of these announced themselves. Each produced a report
-that looked exactly like a good report.
+```bash
+node .claude/harness-core/models.mjs status
+```
 
----
+The status command reports which roles resolve, which reviewers are reachable,
+which runner would be used, and whether the reviewer roster is actually
+cross-vendor. It never prints secret values. See [`docs/MODELS.md`](docs/MODELS.md).
 
-## When NOT to use this
+## When not to use it
 
-If you cannot find two items with no edge between them, there is no graph to
-build. A single bug fix, an exploratory question, or anything where you want to
-approve each step is cheaper and better as one agent in the main loop.
+Do not use the graph when the work is not wide.
 
-The coordination is overhead unless the work is wide.
+If you cannot find two queued items with no edge between them, use one agent in
+the main loop. A single bug fix, an exploratory design question, or work that you
+want to approve step by step does not need this coordination cost.
 
----
+On small projects, the spine can still be useful without the full graph: map,
+anchors, push guard, and paired-artifact gate.
 
-## Status
+## Current status
 
-Working code, extracted and generalised. `core/` runs and is exercised by
-`selftest.sh` — 205 assertions, currently green.
+The core scripts run locally under `selftest.sh`.
 
-**Batches driven under the generalised config: two.** Both on a small Astro site
-with no test suite and no linter, which is a useful stress of the "anchors are
-whatever exits non-zero" claim:
+```text
+338 assertions passing
+```
 
-| batch | dispatched | nodes | waves | rejected |
-|---|---|---|---|---|
-| batch-1 | 6 | 4 | 1 | 0 |
-| batch-2 | 6 | 5 | 1 | 0 |
+The canary rig now plants known defects on prebuilt branches and scores whether
+verifier lenses catch them. That closed the older gap where the generalized
+harness had not shown its verify stage rejecting bad work. The remaining known
+gap is variance: identical verifier runs can disagree on a real defect, so
+`verify.confirmAccepted` exists for high-risk batches and is off by default
+because it doubles verifier spend.
 
-Those two batches produced scars 17, 18 and 19. The original, project-specific
-version drove nine.
-
-**Read the acceptance rate as a gap, not a result.** 10 of 10 nodes accepted
-first-pass means the lenses agreed with the builders; it does not mean the
-builders were right, and it does not show the harness catching bad work, because
-**it has not yet been given any.** The one run that genuinely exercised the verify
-stage is the batch where 3 of 3 nodes were green on every anchor and all 3 were
-rejected on semantics — and that ran under the original, not this.
-
-Known gaps are listed honestly at the end of [docs/DESIGN.md](docs/DESIGN.md).
-
----
+Read [`docs/SCARS.md`](docs/SCARS.md) before simplifying guards. Most entries are
+failures that produced clean-looking reports.
 
 ## License
 
-[MPL-2.0](LICENSE). File-level copyleft: keep the notice, and publish your
-changes *to these files*. Deliberately **not** GPL — `install.sh` copies `core/`
-into your repository, and a whole-work copyleft would reach the project you
-installed it into. Your code stays yours; the harness stays open.
+[MPL-2.0](LICENSE). File-level copyleft applies to the harness files. Your
+consumer project remains yours.
